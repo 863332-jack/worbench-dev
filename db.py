@@ -106,6 +106,16 @@ CREATE TABLE IF NOT EXISTS recon_result (
     evidence TEXT,                   -- 依据说明
     reason TEXT,                     -- 复核原因
     raw_values_json TEXT,            -- 上传账单该行原始单元格值（JSON 数组，按表头顺序）
+    -- 智能对账：差异字段（本单 vs 历史基准）
+    quantity REAL,                   -- 数量（用于金额差异换算）
+    bill_amount REAL,                -- 本单合计金额（上传账单「合计金额」列）
+    bill_date TEXT,                  -- 本单账单日期 YYYY-MM-DD
+    price_gap REAL,                  -- 单价差异 = 本单单价 − 历史最低价
+    amount_gap REAL,                 -- 金额差异 = 单价差异 × 数量
+    gap_rate REAL,                   -- 差异率 = 单价差异 / 历史最低价
+    diff_types TEXT,                 -- 差异类型（逗号分隔的代码，见 config.DIFF_LABELS）
+    hist_period TEXT,                -- 历史最低价所在期间 YYYY-MM
+    date_gap INTEGER,                -- 账单月 − 基准月（月数，正数=基准更早）
     created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_result_batch ON recon_result(recon_no);
@@ -153,6 +163,12 @@ def init_db():
                 conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, typ))
     add_cols("recon_batch", {"headers_json": "TEXT", "mapping_diff_json": "TEXT"})
     add_cols("recon_result", {"raw_values_json": "TEXT"})
+    # 智能对账：差异字段（老库升级时补列，历史批次这些字段为空，前端按「—」展示）
+    add_cols("recon_result", {
+        "quantity": "REAL", "bill_amount": "REAL", "bill_date": "TEXT",
+        "price_gap": "REAL", "amount_gap": "REAL", "gap_rate": "REAL",
+        "diff_types": "TEXT", "hist_period": "TEXT", "date_gap": "INTEGER",
+    })
     add_cols("hist_price", {"quantity": "REAL", "total_amount": "REAL",
                             "bill_date": "TEXT", "remark": "TEXT"})
     conn.commit()
@@ -480,13 +496,22 @@ def save_recon_file(recon_no, file_name, headers, mapping_diff, results, counts)
             (recon_no, file_name, _jdumps(headers or []), _jdumps(mapping_diff or []), now()),
         )
         for r in results:
+            p = dict(r)
+            # 差异字段对老调用方可能缺失：统一补 None，保证 INSERT 参数完整
+            for k in ("quantity", "bill_amount", "bill_date", "price_gap",
+                      "amount_gap", "gap_rate", "diff_types", "hist_period", "date_gap"):
+                p.setdefault(k, None)
             conn.execute(
                 """INSERT INTO recon_result
                 (recon_no,supplier,model,model_norm,material,size,bill_price,period,source_file,
-                 source_row,status,lowest_price,evidence,reason,raw_values_json,created_at)
+                 source_row,status,lowest_price,evidence,reason,raw_values_json,created_at,
+                 quantity,bill_amount,bill_date,price_gap,amount_gap,gap_rate,diff_types,
+                 hist_period,date_gap)
                 VALUES(:recon_no,:supplier,:model,:model_norm,:material,:size,:bill_price,:period,:source_file,
-                       :source_row,:status,:lowest_price,:evidence,:reason,:raw_values_json,:created_at)""",
-                r,
+                       :source_row,:status,:lowest_price,:evidence,:reason,:raw_values_json,:created_at,
+                       :quantity,:bill_amount,:bill_date,:price_gap,:amount_gap,:gap_rate,:diff_types,
+                       :hist_period,:date_gap)""",
+                p,
             )
         conn.execute(
             """UPDATE recon_batch SET total_rows=?,n_matched=?,n_review=?,n_above=?,n_nohistory=?,n_error=?
@@ -563,6 +588,95 @@ def list_recon_batches():
     conn = connect()
     rows = conn.execute("SELECT * FROM recon_batch ORDER BY id DESC LIMIT 50").fetchall()
     conn.close(); return [dict(r) for r in rows]
+
+
+# ---------- 账单备份（按条件筛选 → 打包） ----------
+
+# 账单月份口径：优先 period（YYYY-MM），缺失时退回 bill_date 的年月
+_MONTH_EXPR = "COALESCE(NULLIF(period,''), substr(bill_date,1,7))"
+
+
+def query_backup_rows(kinds=("history",), suppliers=None, month_from="", month_to="",
+                      include_excluded=False):
+    """按「账单类型 + 供应商 + 月份范围」筛选可备份的账单行。
+
+    kinds: history=历史价格库(hist_price) / recon=核对账单(recon_result)
+    返回 {"history": [...], "recon": [...]}，元素为统一字段（供应商/日期/型号/尺寸/材质/
+    数量/单价/合计金额/备注），可直接写成标准录入模板供后续回灌恢复。
+    """
+    out = {"history": [], "recon": []}
+    suppliers = [s for s in (suppliers or []) if s]
+    conn = connect()
+    try:
+        if "history" in kinds:
+            where, args = [], []
+            if suppliers:
+                where.append("supplier IN (%s)" % ",".join("?" * len(suppliers)))
+                args += suppliers
+            if month_from:
+                where.append(_MONTH_EXPR + " >= ?"); args.append(month_from)
+            if month_to:
+                where.append(_MONTH_EXPR + " <= ?"); args.append(month_to)
+            if not include_excluded:
+                where.append("(exclude_reason IS NULL OR exclude_reason='')")
+            sql = ("SELECT supplier, model, material, size, quantity, bill_date, period, "
+                   "unit_price, total_amount, remark, source_file, source_row, batch_no "
+                   "FROM hist_price" + (" WHERE " + " AND ".join(where) if where else "") +
+                   " ORDER BY supplier, " + _MONTH_EXPR + ", bill_date, source_row, id")
+            out["history"] = [dict(r) for r in conn.execute(sql, args)]
+        if "recon" in kinds:
+            where, args = [], []
+            if suppliers:
+                where.append("supplier IN (%s)" % ",".join("?" * len(suppliers)))
+                args += suppliers
+            if month_from:
+                where.append(_MONTH_EXPR + " >= ?"); args.append(month_from)
+            if month_to:
+                where.append(_MONTH_EXPR + " <= ?"); args.append(month_to)
+            sql = ("SELECT supplier, model, material, size, quantity, bill_date, period, "
+                   "bill_price AS unit_price, bill_amount AS total_amount, source_file, "
+                   "source_row, status, recon_no, diff_types, price_gap, amount_gap "
+                   "FROM recon_result" + (" WHERE " + " AND ".join(where) if where else "") +
+                   " ORDER BY supplier, " + _MONTH_EXPR + ", bill_date, source_row, id")
+            out["recon"] = [dict(r) for r in conn.execute(sql, args)]
+    finally:
+        conn.close()
+    return out
+
+
+def load_model_key_index():
+    """型号宽松键索引：{model_key: [{supplier, model, model_norm, ...基准}]}。
+
+    用于「智能匹配」第二层：精确未命中时，忽略 - _ * 空格等符号差异再试一次，
+    命中结果只作参考并标记为需人工复核，不会自动判定为最低价。
+    """
+    from parsers import model_key
+    conn = connect()
+    rows = conn.execute(
+        """SELECT supplier, model, model_norm, materials, min_price, latest_price,
+                  price_levels, price_detail, risk_flag FROM price_index"""
+    ).fetchall()
+    conn.close()
+    idx = {}
+    for r in rows:
+        d = dict(r)
+        idx.setdefault(model_key(d["model"]), []).append(d)
+    return idx
+
+
+def summary_counts(recon_no):
+    """批次差异汇总（直接走 SQL 聚合，避免前端再算一遍）。"""
+    conn = connect()
+    try:
+        row = conn.execute(
+            """SELECT COUNT(*) AS total,
+                      COALESCE(SUM(CASE WHEN amount_gap > 0 THEN amount_gap ELSE 0 END), 0) AS overpay,
+                      COALESCE(SUM(CASE WHEN amount_gap < 0 THEN amount_gap ELSE 0 END), 0) AS underpay,
+                      SUM(CASE WHEN amount_gap IS NOT NULL AND ABS(amount_gap) > 0.0001 THEN 1 ELSE 0 END) AS diff_rows
+               FROM recon_result WHERE recon_no=?""", (recon_no,)).fetchone()
+        return dict(row) if row else {}
+    finally:
+        conn.close()
 
 
 # ---------- 型号归一化迁移 ----------

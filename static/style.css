@@ -90,6 +90,20 @@ tr:hover td{ background:#fafcff; }
 .stat .n{ font-size:24px; font-weight:650; } .stat .l{ color:var(--muted); font-size:12px; }
 .stat.green .n{ color:var(--green); } .stat.orange .n{ color:var(--orange); }
 .stat.yellow .n{ color:var(--yellow); }
+.stat.red .n{ color:var(--red); } .stat.gray .n{ color:var(--muted); }
+.stat .hint{ color:var(--muted); font-size:11px; margin-top:2px; }
+/* 备份筛选：复选组 */
+.chk{ display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:400; cursor:pointer; }
+.chk input{ accent-color:var(--primary); }
+.chk-group{ display:flex; gap:14px; flex-wrap:wrap; align-items:center; }
+input[type=month]{ padding:8px 10px; border:1px solid var(--line); border-radius:8px; font-size:13px;
+  background:#fff; color:var(--text); }
+.diff-filters .chip{ border-style:dashed; }
+.diff-filters .chip.active{ border-style:solid; }
+.gap-up{ color:var(--red); font-weight:600; }
+.gap-down{ color:var(--green); font-weight:600; }
+.difftag{ display:inline-block; padding:1px 7px; margin:1px 3px 1px 0; border-radius:9px;
+  background:#f2f5fa; color:#455; font-size:11px; white-space:nowrap; }
 
 .toast{ position:fixed; bottom:28px; left:50%; transform:translateX(-50%) translateY(120px);
   background:#1f2733; color:#fff; padding:12px 22px; border-radius:10px; font-size:13px;

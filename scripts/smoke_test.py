@@ -276,6 +276,83 @@ def main():
           r.get("ok") is True and "临时未使用供应商" not in [x["name"] for x in r.get("suppliers", [])],
           str(r)[:160])
 
+    print("== 13. 账单备份导出（筛选 → 打包 → 可回灌） ==")
+    import io
+    import json as _json
+    import zipfile
+    bk_rows = [["杰盛", "2027-01-02", "BK-1", "8*8", "铜", 10, 4, 40, ""],
+               ["杰盛", "2027-01-03", "BK-2", "8*8", "铜", 5, 6, 30, ""],
+               ["云锦", "2027-02-05", "BK-3", "", "塑料", 20, 3, 60, ""]]
+    f_bk = make_xlsx(os.path.join(TMP, "bk_hist.xlsx"), bk_rows)
+    r = s.post(BASE + "/api/history/upload", files={"files": open(f_bk, "rb")}, timeout=30).json()
+    check("备份用历史数据导入 ok", r.get("ok") is True and r.get("added") == 3, str(r)[:160])
+
+    r = s.get(BASE + "/api/history/backup/preview?kinds=history&month_from=2027-01&month_to=2027-01",
+              timeout=20).json()
+    check("备份预览：仅 1 月 → 2 条 / 1 个文件",
+          r.get("ok") and r["totals"]["rows"] == 2 and r["totals"]["files"] == 1,
+          str(r.get("totals")))
+    r = s.get(BASE + "/api/history/backup/preview?kinds=history&month_from=2027-02&month_to=2027-01", timeout=20)
+    check("备份：起止月份倒置被拒 400", r.status_code == 400, str(r.status_code))
+    r = s.get(BASE + "/api/history/backup/preview?kinds=history&month_from=2027-1", timeout=20)
+    check("备份：月份格式错误被拒 400", r.status_code == 400, str(r.status_code))
+
+    resp = s.get(BASE + "/api/history/backup?kinds=history&month_from=2027-01&month_to=2027-02", timeout=60)
+    zpath = os.path.join(TMP, "bk.zip")
+    open(zpath, "wb").write(resp.content)
+    check("备份打包 200 且为 ZIP", resp.status_code == 200 and resp.content[:2] == b"PK", str(resp.status_code))
+    zf = zipfile.ZipFile(zpath)
+    names = zf.namelist()
+    check("备份包含清单(CSV/JSON)与恢复说明",
+          {"备份清单.csv", "备份清单.json", "恢复说明.txt"} <= set(names), str(names))
+    man = _json.loads(zf.read("备份清单.json").decode("utf-8"))
+    check("备份清单行数与筛选一致", man["totals"]["rows"] == 3, str(man.get("totals")))
+    check("备份清单含 SHA256 校验值", all(len(f["sha256"]) == 16 for f in man["files"]), "")
+    xs = [n for n in names if n.endswith(".xlsx")]
+    check("分表命名可归档（分表以「历史账单_供应商_期间」命名）",
+          len(xs) >= 2 and all(n.startswith("历史账单_") and n.count("_") >= 2 for n in xs), str(xs))
+    zp = os.path.join(TMP, "bk_unzip")
+    os.makedirs(zp, exist_ok=True)
+    zf.extractall(zp)
+    before = s.get(BASE + "/api/status", timeout=10).json()["hist_rows"]
+    rr = s.post(BASE + "/api/history/upload",
+                files=[("files", open(os.path.join(zp, n), "rb")) for n in xs], timeout=60).json()
+    after = s.get(BASE + "/api/status", timeout=10).json()["hist_rows"]
+    check("备份分表可回灌（格式合法）且不产生重复",
+          rr.get("ok") is True and after == before,
+          "ok=%s before=%s after=%s" % (rr.get("ok"), before, after))
+
+    print("== 14. 智能对账：差异量化与汇总 ==")
+    b2 = [["杰盛", "2027-03-10", "BK-1", "8*8", "铜", 10, 5, 50, ""],      # 单价 +1 → 金额 +10
+          ["杰盛", "2027-03-10", "BK-2", "8*8", "铜", 5, 5, 25, ""],       # 单价 -1 → 金额 -5
+          ["云锦", "2027-03-10", "BK-3", "", "塑料", 20, 3, 60, ""]]       # 持平
+    f_b2 = make_xlsx(os.path.join(TMP, "bk_bill.xlsx"), b2)
+    r = s.post(BASE + "/api/reconcile", files={"files": open(f_b2, "rb")}, timeout=30).json()
+    c = r.get("counts", {})
+    check("核对返回差异金额：超付 10 / 少付 -5",
+          abs(c.get("overpay", 0) - 10) < 0.01 and abs(c.get("underpay", 0) + 5) < 0.01, str(c))
+    check("差异笔数 = 2", c.get("diff") == 2, str(c.get("diff")))
+    no2 = r["batches"][0]["recon_no"]
+    res = s.get(BASE + "/api/results/" + no2, timeout=20).json()
+    amt = (res.get("summary") or {}).get("amount", {})
+    check("统计口径：本单 135 / 应有 130 / 净差异 5",
+          abs(amt.get("bill_total", 0) - 135) < 0.01 and abs(amt.get("should_total", 0) - 130) < 0.01
+          and abs(amt.get("net_gap", 0) - 5) < 0.01, str(amt))
+    codes = {d["code"] for d in (res.get("summary") or {}).get("by_diff", [])}
+    check("差异类型含 金额偏高 / 金额偏低", {"amt_high", "amt_low"} <= codes, str(codes))
+    row = [x for x in res["results"] if x["model"] == "BK-1"][0]
+    check("单行差异：单价 +1 / 差异率 25%（1÷4）/ 金额 +10",
+          abs(row["price_gap"] - 1) < 1e-6 and abs(row["gap_rate"] - 0.25) < 1e-6
+          and abs(row["amount_gap"] - 10) < 0.01, str(row)[:180])
+    rf = s.get(BASE + "/api/results/%s?diff=amt_high" % no2, timeout=20).json()
+    check("按差异类型筛选生效（只返回 1 条）", len(rf.get("results", [])) == 1,
+          str(len(rf.get("results", []))))
+    resp = s.get(BASE + "/api/download/" + no2, timeout=30)
+    open(os.path.join(TMP, "bk_result.xlsx"), "wb").write(resp.content)
+    from openpyxl import load_workbook
+    wb2 = load_workbook(os.path.join(TMP, "bk_result.xlsx"))
+    check("结果 Excel 含「差异汇总」工作表", "差异汇总" in wb2.sheetnames, str(wb2.sheetnames))
+
     print()
     print("=" * 48)
     print("冒烟测试结果：通过 %d 项 / 失败 %d 项" % (PASS, FAIL))

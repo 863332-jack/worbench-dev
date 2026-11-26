@@ -9,11 +9,12 @@ from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from config import (
-    OUTPUT_DIR, STATUS_LABELS,
+    OUTPUT_DIR, STATUS_LABELS, DIFF_LABELS,
     STATUS_MATCHED_LOWEST, STATUS_NEEDS_REVIEW, STATUS_ABOVE_LOWEST,
     STATUS_NO_HISTORY, STATUS_PARSE_ERROR,
 )
 import field_map
+import recon_stats
 
 STATUS_COLOR = {
     STATUS_MATCHED_LOWEST: "E2EFDA",
@@ -31,9 +32,17 @@ thin = Side(style="thin", color=C_BORDER)
 border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
 # 核对视角工作表（不属于按表头输出的明细）
+# 智能对账：在原始 12 列基础上补「单价差异 / 差异率 / 数量 / 金额差异 / 基准期间 / 月份差 / 差异类型」
 VIEW_HEADERS = ["序号", "供应商", "型号", "材质(展示)", "尺寸", "本单单价", "历史最低价",
+                "单价差异", "差异率%", "数量", "金额差异", "基准期间", "月份差", "差异类型",
                 "状态", "依据", "复核原因", "来源文件", "行号"]
-VIEW_WIDTHS = [6, 12, 22, 16, 16, 11, 12, 14, 46, 46, 22, 8]
+VIEW_WIDTHS = [6, 12, 22, 16, 16, 11, 12, 11, 10, 9, 12, 10, 8, 20, 14, 52, 52, 22, 8]
+# 金额类列（序号按 VIEW_HEADERS 从 1 开始）：单价/最低价/单价差异/差异率/数量/金额差异
+MONEY_COLS = (6, 7, 8, 11)
+
+
+def _diff_labels(raw):
+    return "、".join(DIFF_LABELS.get(c, c) for c in str(raw or "").split(",") if c)
 
 
 def _headers_of(batch, results):
@@ -109,20 +118,137 @@ def fill_view(ws, title, results, color=None):
         ws.column_dimensions[get_column_letter(j)].width = w
     for i, r in enumerate(results, 1):
         row = i + 2
+        rate = r.get("gap_rate")
         vals = [i, r.get("supplier"), r.get("model"), r.get("material"), r.get("size"),
-                r.get("bill_price"), r.get("lowest_price"), STATUS_LABELS.get(r.get("status"), ""),
+                r.get("bill_price"), r.get("lowest_price"), r.get("price_gap"),
+                round(rate * 100, 2) if isinstance(rate, (int, float)) else None,
+                r.get("quantity"), r.get("amount_gap"), r.get("hist_period"),
+                r.get("date_gap"), _diff_labels(r.get("diff_types")),
+                STATUS_LABELS.get(r.get("status"), ""),
                 r.get("evidence"), r.get("reason"), r.get("source_file"), r.get("source_row")]
         for j, v in enumerate(vals, 1):
             cell = ws.cell(row=row, column=j, value=v)
             cell.border = border
-            cell.alignment = Alignment(vertical="center", wrap_text=(j in (9, 10)))
-            if j in (6, 7) and isinstance(v, (int, float)):
+            cell.alignment = Alignment(vertical="center", wrap_text=(j in (14, 16, 17)))
+            if j in MONEY_COLS and isinstance(v, (int, float)):
                 cell.number_format = "0.00"
+            if j == 9 and isinstance(v, (int, float)):
+                cell.number_format = "0.00"
+            if j == 10 and isinstance(v, (int, float)):
+                cell.number_format = "0.##"
+            # 差异金额着色：超付红、少付绿（符合国内财务阅读习惯）
+            if j in (8, 11) and isinstance(v, (int, float)) and abs(v) > 0.0001:
+                cell.font = Font(color="FFC00000" if v > 0 else "FF2E7D32")
             if color:
                 cell.fill = PatternFill("solid", fgColor=color)
     ws.freeze_panes = "A3"
     if results:
         ws.auto_filter.ref = "A2:%s%d" % (get_column_letter(n), len(results) + 2)
+
+
+def _block_title(ws, row, text, ncols):
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
+    c = ws.cell(row=row, column=1, value=text)
+    c.font = Font(bold=True, size=12, color=C_HEAD_FG)
+    c.fill = PatternFill("solid", fgColor=C_TITLE)
+    c.alignment = Alignment(vertical="center")
+    ws.row_dimensions[row].height = 22
+
+
+def _table_head(ws, row, headers):
+    for j, h in enumerate(headers, 1):
+        c = ws.cell(row=row, column=j, value=h)
+        c.font = Font(bold=True, color=C_HEAD_FG)
+        c.fill = PatternFill("solid", fgColor=C_HEAD)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = border
+    ws.row_dimensions[row].height = 24
+
+
+def fill_diff_summary(ws, summary):
+    """差异汇总工作表：总体金额差异 + 按供应商 + 按差异类型（异常项汇总）。"""
+    ncol = 11
+    ws.column_dimensions["A"].width = 20
+    for j in range(2, ncol + 1):
+        ws.column_dimensions[get_column_letter(j)].width = 14
+
+    row = 1
+    _block_title(ws, row, "一、总体金额差异（金额单位：元）", ncol)
+    row += 1
+    amt = summary.get("amount", {})
+    overall = [
+        ("记录总数", summary.get("total", 0), "本次核对账单的行数"),
+        ("本单金额合计", amt.get("bill_total", 0), "取自上传账单「合计金额」列（缺失时用 单价×数量 估算）"),
+        ("应有金额合计", amt.get("should_total", 0), "历史最低价 × 数量，仅统计有数量的行"),
+        ("超付合计", amt.get("overpay", 0), "本单高于历史最低价的金额之和（红色为多付）"),
+        ("少付合计", amt.get("underpay", 0), "本单低于历史最低价的金额之和（负数）"),
+        ("净差异", amt.get("net_gap", 0), "超付 + 少付"),
+        ("有金额差异的笔数", amt.get("diff_rows", 0), "金额差异不为 0 的行数"),
+        ("可换算金额的行数", amt.get("rows_with_quantity", 0), "同时具备数量与历史最低价的行数"),
+    ]
+    for k, v, note in overall:
+        a = ws.cell(row=row, column=1, value=k); a.font = Font(bold=True); a.border = border
+        b = ws.cell(row=row, column=2, value=v); b.border = border
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and k != "记录总数" and "笔数" not in k and "行数" not in k:
+            b.number_format = "0.00"
+            if k in ("超付合计",) and v:
+                b.font = Font(color="FFC00000", bold=True)
+        c = ws.cell(row=row, column=3, value=note); c.border = border
+        c.alignment = Alignment(wrap_text=True, vertical="center")
+        row += 1
+
+    row += 1
+    _block_title(ws, row, "二、按供应商汇总（按超付金额降序）", ncol)
+    row += 1
+    _table_head(ws, row, ["供应商", "记录数", "已匹配最低", "高于最低", "需复核",
+                          "无历史", "解析失败", "有差异笔数", "超付合计", "少付合计", "最大差异率%"])
+    row += 1
+    for s in summary.get("by_supplier", []):
+        vals = [s.get("supplier"), s.get("total"), s.get("matched"), s.get("above"),
+                s.get("review"), s.get("nohistory"), s.get("error"), s.get("diff_rows"),
+                s.get("overpay"), s.get("underpay"),
+                round((s.get("max_gap_rate") or 0) * 100, 2)]
+        for j, v in enumerate(vals, 1):
+            c = ws.cell(row=row, column=j, value=v)
+            c.border = border
+            if j in (9, 10) and isinstance(v, (int, float)):
+                c.number_format = "0.00"
+                if j == 9 and v:
+                    c.font = Font(color="FFC00000")
+            if j == 11 and isinstance(v, (int, float)):
+                c.number_format = "0.00"
+        row += 1
+
+    row += 1
+    _block_title(ws, row, "三、按差异类型汇总（异常项分布）", ncol)
+    row += 1
+    _table_head(ws, row, ["差异类型", "涉及笔数", "超付合计", "少付合计", "说明"])
+    ws.merge_cells(start_row=row, start_column=5, end_row=row, end_column=ncol)
+    row += 1
+    for d in summary.get("by_diff", []):
+        note = {
+            "amt_high": "本单单价高于历史最低价，存在可节省空间",
+            "amt_low": "本单低于历史最低价，多为新高价或录入异常",
+            "no_hist": "价格库无该型号，需补录历史价或单独议价",
+            "parse_err": "单价为空/待核价等，无法参与比价",
+            "multi_level": "同型号多档历史价，最低价是否适用需确认",
+            "date_before": "账单月份早于最低价出现月份，属倒推比价",
+            "base_stale": "最低价距今较久，价格可能已失效",
+            "date_missing": "账单月份缺失，无法判断时效",
+            "near_model": "型号近似命中（忽略符号差异），需确认是否同一物料",
+        }.get(d.get("code"), "")
+        vals = [d.get("label"), d.get("rows"), d.get("overpay"), d.get("underpay"), note]
+        for j, v in enumerate(vals, 1):
+            c = ws.cell(row=row, column=j, value=v)
+            c.border = border
+            if j in (3, 4) and isinstance(v, (int, float)):
+                c.number_format = "0.00"
+                if j == 3 and v:
+                    c.font = Font(color="FFC00000")
+            if j == 5:
+                c.alignment = Alignment(wrap_text=True, vertical="center")
+        ws.merge_cells(start_row=row, start_column=5, end_row=row, end_column=ncol)
+        row += 1
 
 
 def export_results(recon_no, results, batch):
@@ -135,6 +261,10 @@ def export_results(recon_no, results, batch):
     ws.title = "核对明细"
     fill_header_output(ws, "核对明细 · 表头与上传账单完全一致（%d 列）" % len(headers),
                        headers, results)
+
+    # 差异汇总（智能对账）：总体金额差异 / 按供应商 / 按差异类型
+    summary = recon_stats.summarize(results)
+    fill_diff_summary(wb.create_sheet("差异汇总"), summary)
 
     # 核对视角工作表（派生字段，不并入明细）
     rv = [r for r in results if r["status"] in (STATUS_NEEDS_REVIEW, STATUS_NO_HISTORY, STATUS_PARSE_ERROR)]
@@ -162,7 +292,14 @@ def export_results(recon_no, results, batch):
          % (" / ".join(headers), len(headers))),
         ("字段映射差异", "；".join(diff) if diff else "无差异：上传表头全部字段均成功映射"),
         ("匹配规则", "按供应商+型号匹配；材质仅展示不参与；最低价为历史有效单价（排除空价/待核价/0价）的最小值"),
-        ("状态说明", "已匹配最低价=本单单价等于历史最低；需人工复核=同型号多档价/低于历史最低/无历史/解析失败；高于历史最低价=存在更低历史价"),
+        ("差异口径", "单价差异 = 本单单价 − 历史最低价；金额差异 = 单价差异 × 数量；差异率 = 单价差异 / 历史最低价"),
+        ("金额汇总", "本单金额合计 %.2f 元；应有金额合计（最低价×数量）%.2f 元；超付 %.2f 元、少付 %.2f 元"
+         % (summary["amount"]["bill_total"], summary["amount"]["should_total"],
+            summary["amount"]["overpay"], summary["amount"]["underpay"])),
+        ("差异类型", "金额偏高 / 金额偏低 / 无历史基准 / 单价无法解析 / 多档价待定 / 日期早于基准 / 基准过期 / 月份缺失 / 型号近似匹配；"
+                     "其中「型号近似匹配」是忽略符号差异后的命中，仅作参考、必须人工确认"),
+        ("工作表说明", "「核对明细」表头严格等于上传账单；「差异汇总」给出总体金额差异、按供应商、按差异类型三块统计"),
+        ("状态说明", "已匹配最低价=本单单价等于历史最低；需人工复核=同型号多档价/低于历史最低/近似型号/无历史/解析失败；高于历史最低价=存在更低历史价"),
         ("备注", "核对产生的状态/依据/复核原因等派生字段放在独立工作表，未加入「核对明细」表头，以保证明细与上传账单列完全一致"),
     ]
     ws5 = wb.create_sheet("说明")

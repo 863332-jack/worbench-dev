@@ -63,6 +63,36 @@
     </div>
     <div class="card">
       <div class="card-head">
+        <div><h2>账单备份导出</h2>
+          <p class="muted">按账单类型、供应商、月份范围筛选后打包下载。分表为标准录入模板格式，解压后可直接从本页重新上传恢复；随包附「备份清单」(CSV/JSON) 与「恢复说明」。</p></div>
+      </div>
+      <div class="form-row">
+        <label>账单类型</label>
+        <label class="chk"><input type="checkbox" id="bkKindHistory" checked> 历史账单（价格基准）</label>
+        <label class="chk"><input type="checkbox" id="bkKindRecon"> 核对账单（已核对明细）</label>
+      </div>
+      <div class="form-row">
+        <label>月份范围</label>
+        <input type="month" id="bkFrom"> <span class="muted">至</span>
+        <input type="month" id="bkTo"> <span class="muted">留空表示不限</span>
+      </div>
+      <div class="form-row">
+        <label>供应商</label>
+        <div id="bkSuppliers" class="chk-group"><span class="muted">加载中…</span></div>
+      </div>
+      <div class="form-row">
+        <label>其它</label>
+        <label class="chk"><input type="checkbox" id="bkInclExcluded"> 包含无效价行（空价/待核价，仅影响历史账单）</label>
+      </div>
+      <div class="actions">
+        <button class="btn ghost" id="btnBkPreview">预览将导出什么</button>
+        <button class="btn primary" id="btnBkDownload">打包下载 ZIP</button>
+      </div>
+      <div class="msg" id="bkMsg"></div>
+      <div class="report" id="bkPreview"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
         <div><h2>供应商管理</h2>
           <p class="muted">供应商一律以数据库为准，不在代码中写死。新增后立即出现在两个上传入口的下拉中，并自动纳入账单校验名单。</p></div>
         <div class="head-actions">
@@ -124,7 +154,10 @@
         <button class="chip" data-status="no_history">无历史记录</button>
         <button class="chip" data-status="parse_error">解析失败</button>
       </div>
+      <div class="filters diff-filters" id="diffFilters" style="display:none"></div>
       <div class="statcards" id="resultStats"></div>
+      <div class="statcards" id="resultAmounts"></div>
+      <div class="tablewrap" id="resultSuppliers" style="display:none"></div>
       <div class="tablewrap" id="resultTable"><div class="empty">请先选择一个核对批次</div></div>
     </div>
   </section>

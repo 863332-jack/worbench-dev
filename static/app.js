@@ -6,8 +6,8 @@
 // - 补充异步加载容错与「解析失败」筛选。
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
-let state = { histFiles: [], rcFiles: [], currentRecon: '', currentStatus: '', isAdmin: false,
-              suppliers: [], supOpener: '' };
+let state = { histFiles: [], rcFiles: [], currentRecon: '', currentStatus: '', currentDiff: '',
+              isAdmin: false, suppliers: [], supOpener: '' };
 
 const BTN_HIST_TEXT = '上传并校验（追加）';
 const BTN_RC_TEXT = '开始核对';
@@ -19,6 +19,12 @@ const STATUS_LABEL = {
 const STATUS_CLS = {
   matched_lowest:'st-match', needs_review:'st-review', above_lowest:'st-above',
   no_history:'st-review', parse_error:'st-err'
+};
+// 差异类型标签（由 /api/results 的 summary.by_diff 覆盖补全，这里给静态兜底）
+const DIFF_LABEL = {
+  amt_high:'金额偏高', amt_low:'金额偏低', no_hist:'无历史基准', parse_err:'单价无法解析',
+  multi_level:'多档价待定', date_before:'日期早于基准', base_stale:'基准过期',
+  date_missing:'月份缺失', near_model:'型号近似匹配'
 };
 
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show');
@@ -210,24 +216,47 @@ async function loadResultBatches(){
     if(sel.value) loadResults();
   }catch(e){ $('#resultTable').innerHTML='<div class="empty">批次加载失败，请刷新重试</div>'; }
 }
-$('#resultBatch').addEventListener('change',()=>{ state.currentRecon=$('#resultBatch').value; loadResults(); });
+$('#resultBatch').addEventListener('change',()=>{
+  state.currentRecon=$('#resultBatch').value;
+  state.currentDiff='';   // 换批次时清掉差异筛选，避免筛出空表
+  loadResults();
+});
 $$('#resultFilters .chip').forEach(chip=>chip.addEventListener('click',()=>{
   $$('#resultFilters .chip').forEach(c=>c.classList.toggle('active',c===chip));
   state.currentStatus=chip.dataset.status; loadResults();
 }));
 
 async function loadResults(){
-  const no=$('#resultBatch').value; if(!no){ $('#resultTable').innerHTML='<div class="empty">请先选择一个核对批次</div>'; return; }
+  const no=$('#resultBatch').value;
+  if(!no){ $('#resultTable').innerHTML='<div class="empty">请先选择一个核对批次</div>'; return; }
   try{
-    const url='/api/results/'+no+(state.currentStatus?('?status='+state.currentStatus):'');
+    const p=new URLSearchParams();
+    if(state.currentStatus) p.set('status',state.currentStatus);
+    if(state.currentDiff) p.set('diff',state.currentDiff);
+    const url='/api/results/'+no+(p.toString()?('?'+p.toString()):'');
     const r=await fetch(url).then(x=>x.json());
     if(!r.ok){ $('#resultTable').innerHTML='<div class="empty">加载失败</div>'; return; }
-    const b=r.batch;
+    const b=r.batch, s=r.summary||{}, amt=s.amount||{};
+    (s.by_diff||[]).forEach(d=>{ DIFF_LABEL[d.code]=d.label; });
+    // 状态统计（整批口径，不随筛选变化）
     $('#resultStats').innerHTML=`
       <div class="stat"><div class="n">${b.total_rows}</div><div class="l">总记录</div></div>
       <div class="stat green"><div class="n">${b.n_matched}</div><div class="l">已匹配最低价</div></div>
       <div class="stat orange"><div class="n">${b.n_review+b.n_nohistory+b.n_error}</div><div class="l">需人工复核</div></div>
       <div class="stat yellow"><div class="n">${b.n_above}</div><div class="l">高于历史最低价</div></div>`;
+    // 金额统计（智能对账）
+    $('#resultAmounts').innerHTML=`
+      <div class="stat"><div class="n">${money(amt.bill_total)}</div><div class="l">本单金额合计</div>
+        <div class="hint">上传账单「合计金额」列合计</div></div>
+      <div class="stat"><div class="n">${money(amt.should_total)}</div><div class="l">应有金额合计</div>
+        <div class="hint">历史最低价 × 数量（${amt.rows_with_quantity||0} 行可换算）</div></div>
+      <div class="stat ${amt.overpay>0?'red':''}"><div class="n">${money(amt.overpay)}</div><div class="l">超付合计</div>
+        <div class="hint">高于历史最低价的多付金额</div></div>
+      <div class="stat ${amt.diff_rows>0?'orange':'green'}"><div class="n">${amt.diff_rows||0}</div><div class="l">有金额差异的笔数</div>
+        <div class="hint">少付合计 ${money(amt.underpay)}</div></div>`;
+    renderSupplierSummary(s);
+    renderDiffChips(s);
+
     const el=$('#resultTable');
     if(!r.results.length){ el.innerHTML='<div class="empty">当前筛选无记录</div>'; return; }
     // 明细表头严格按上传账单原表头
@@ -242,15 +271,62 @@ async function loadResults(){
          `<td class="${cls}">${STATUS_LABEL[x.status]||esc(x.status)}</td></tr>`;
     });
     h+='</tbody></table>';
-    // 依据与复核原因单独呈现，不并入明细表头
-    h+='<div class="detail-evidence"><div class="audit-title">核对依据与复核原因（派生信息，不在上传账单表头中）</div><table><thead><tr><th>#</th><th>型号</th><th>状态</th><th>依据</th><th>复核原因</th></tr></thead><tbody>';
+    // 差异与依据（派生信息，不并入明细表头）
+    h+='<div class="detail-evidence"><div class="audit-title">差异明细与核对依据（派生信息，不在上传账单表头中）</div>'+
+       '<table><thead><tr><th>#</th><th>型号</th><th>本单单价</th><th>历史最低价</th><th>单价差异</th><th>差异率</th>'+
+       '<th>数量</th><th>金额差异</th><th>基准期间</th><th>差异类型</th><th>状态</th><th>依据与复核原因</th></tr></thead><tbody>';
     r.results.forEach((x,i)=>{
-      h+=`<tr><td>${i+1}</td><td>${esc(x.model||'—')}</td><td class="${STATUS_CLS[x.status]||''}">${STATUS_LABEL[x.status]||esc(x.status)}</td><td class="cell-evidence">${esc(x.evidence||'—')}</td><td class="cell-reason">${esc(x.reason||'—')}</td></tr>`;
+      const tags=(x.diff_list||[]).map(c=>`<span class="difftag">${esc(DIFF_LABEL[c]||c)}</span>`).join('')||'—';
+      h+=`<tr><td>${i+1}</td><td>${esc(x.model||'—')}</td><td>${money(x.bill_price)}</td><td>${money(x.lowest_price)}</td>
+        <td>${gapCell(x.price_gap)}</td><td>${pct(x.gap_rate)}</td><td>${fmt(x.quantity)}</td><td>${gapCell(x.amount_gap)}</td>
+        <td>${esc(x.hist_period||'—')}</td><td>${tags}</td>
+        <td class="${STATUS_CLS[x.status]||''}">${STATUS_LABEL[x.status]||esc(x.status)}</td>
+        <td class="cell-evidence">${esc(x.evidence||'—')}${x.reason?('<br><span class="cell-reason">'+esc(x.reason)+'</span>'):''}</td></tr>`;
     });
     h+='</tbody></table></div>';
     el.innerHTML=h;
   }catch(e){ $('#resultTable').innerHTML='<div class="empty">结果加载失败，请刷新重试</div>'; }
 }
+
+function money(v){ return (v===null||v===undefined||v==='')?'—':Number(v).toFixed(2); }
+function pct(v){ return (v===null||v===undefined)?'—':(Number(v)*100).toFixed(2)+'%'; }
+function gapCell(v){
+  if(v===null||v===undefined||v===''||Math.abs(Number(v))<0.0001) return '—';
+  const n=Number(v), cls=n>0?'gap-up':'gap-down';
+  return `<span class="${cls}">${n>0?'+':''}${n.toFixed(2)}</span>`;
+}
+
+function renderSupplierSummary(s){
+  const box=$('#resultSuppliers'), rows=s.by_supplier||[];
+  if(!rows.length){ box.style.display='none'; box.innerHTML=''; return; }
+  box.style.display='';
+  let h='<div class="detail-note">按供应商汇总（智能对账）· 按超付金额降序</div>';
+  h+='<table><thead><tr><th>供应商</th><th>记录数</th><th>已匹配最低</th><th>高于最低</th><th>需复核</th>'+
+     '<th>无历史</th><th>差异笔数</th><th>超付合计</th><th>少付合计</th><th>最大差异率</th></tr></thead><tbody>';
+  rows.forEach(x=>{
+    h+=`<tr><td><b>${esc(x.supplier)}</b></td><td>${x.total}</td><td>${x.matched}</td><td>${x.above}</td>
+      <td>${x.review}</td><td>${x.nohistory}</td><td>${x.diff_rows}</td>
+      <td>${x.overpay?('<span class="gap-up">'+Number(x.overpay).toFixed(2)+'</span>'):'—'}</td>
+      <td>${x.underpay?('<span class="gap-down">'+Number(x.underpay).toFixed(2)+'</span>'):'—'}</td>
+      <td>${pct(x.max_gap_rate)}</td></tr>`;
+  });
+  box.innerHTML=h+'</tbody></table>';
+}
+
+function renderDiffChips(s){
+  const el=$('#diffFilters'), rows=(s.by_diff||[]);
+  if(!rows.length){ el.style.display='none'; el.innerHTML=''; return; }
+  el.style.display='flex';
+  let h=`<button class="chip${state.currentDiff?'':' active'}" data-diff="">全部差异</button>`;
+  rows.forEach(d=>{
+    h+=`<button class="chip${state.currentDiff===d.code?' active':''}" data-diff="${esc(d.code)}">${esc(d.label)} · ${d.rows}</button>`;
+  });
+  el.innerHTML=h;
+  $$('#diffFilters .chip').forEach(c=>c.addEventListener('click',()=>{
+    state.currentDiff=c.dataset.diff||''; loadResults();
+  }));
+}
+
 
 $('#btnDownload').addEventListener('click',()=>{
   const no=$('#resultBatch').value; if(!no){toast('请先选择核对批次');return;}
@@ -294,7 +370,7 @@ async function loadSuppliers(){
     const r=await fetch('/api/suppliers').then(x=>x.json());
     if(!r.ok) throw new Error(r.error||'加载失败');
     state.suppliers=r.suppliers||[];
-    renderSupplierSelects(); renderSupplierTable();
+    renderSupplierSelects(); renderSupplierTable(); renderSupplierCheckboxes();
   }catch(e){
     const msg='<div class="empty">供应商加载失败，请刷新重试</div>';
     ['#supTable','#supList'].forEach(id=>{ const el=$(id); if(el) el.innerHTML=msg; });
@@ -341,7 +417,7 @@ async function submitSupplier(){
     const r=await resp.json();
     if(!r.ok){ msg.className='msg error'; msg.textContent=r.error||'保存失败'; return; }
     state.suppliers=r.suppliers||[];
-    renderSupplierSelects(); renderSupplierTable();
+    renderSupplierSelects(); renderSupplierTable(); renderSupplierCheckboxes();
     msg.className='msg ok'; msg.textContent=r.msg||('已新增供应商「'+r.supplier.name+'」');
     $('#supName').value=''; $('#supAlias').value=''; $('#supRemark').value='';
     // 从下拉点进来的：直接把新供应商选上，省一次选择
@@ -366,11 +442,73 @@ async function deleteSupplier(sid){
     const r=await resp.json();
     if(!r.ok){ toast(r.error||'删除失败'); if(resp.status===403){ state.isAdmin=false; applyAdminUI(); } return; }
     state.suppliers=r.suppliers||[];
-    renderSupplierSelects(); renderSupplierTable();
+    renderSupplierSelects(); renderSupplierTable(); renderSupplierCheckboxes();
     const msg=$('#supMsg'); msg.className='msg ok'; msg.textContent=r.msg||'已删除';
     toast('供应商「'+name+'」已删除');
   }catch(e){ toast('删除请求失败：'+e.message); }
 }
+
+// ===== 账单备份导出（筛选 → 预览 → 打包下载） =====
+function renderSupplierCheckboxes(){
+  const box=$('#bkSuppliers'); if(!box) return;
+  const hasInputs = box.querySelectorAll('input').length > 0;
+  const prev = hasInputs ? new Set($$('#bkSuppliers input:checked').map(x=>x.value)) : null;
+  if(!state.suppliers.length){ box.innerHTML='<span class="muted">暂无供应商档案</span>'; return; }
+  box.innerHTML = state.suppliers.map(s=>{
+    const on = prev ? prev.has(s.name) : true;   // 默认全选＝导出全部供应商
+    return `<label class="chk"><input type="checkbox" value="${esc(s.name)}"${on?' checked':''}> ${esc(s.name)}</label>`;
+  }).join('');
+}
+
+function bkFilters(){
+  const kinds=[];
+  if($('#bkKindHistory').checked) kinds.push('history');
+  if($('#bkKindRecon').checked) kinds.push('recon');
+  return {
+    kinds: kinds.join(','),
+    suppliers: $$('#bkSuppliers input:checked').map(x=>x.value).join(','),
+    month_from: $('#bkFrom').value,
+    month_to: $('#bkTo').value,
+    include_excluded: $('#bkInclExcluded').checked ? '1' : ''
+  };
+}
+function bkQuery(){
+  const o=bkFilters();
+  return Object.keys(o).filter(k=>o[k]).map(k=>k+'='+encodeURIComponent(o[k])).join('&');
+}
+
+$('#btnBkPreview').addEventListener('click',async()=>{
+  const f=bkFilters(), msg=$('#bkMsg'), box=$('#bkPreview');
+  if(!f.kinds){ toast('请至少选择一种账单类型'); return; }
+  msg.className='msg'; msg.textContent='正在统计…'; box.innerHTML='';
+  try{
+    const r=await fetch('/api/history/backup/preview?'+bkQuery()).then(x=>x.json());
+    if(!r.ok){ msg.className='msg error'; msg.textContent=r.error||'预览失败'; return; }
+    if(!r.totals.rows){
+      msg.className='msg error';
+      msg.textContent='当前筛选条件下没有可导出的账单数据，请放宽时间范围/供应商/账单类型';
+      return;
+    }
+    msg.className='msg ok';
+    msg.textContent=`将导出 ${r.totals.files} 个文件 / ${r.totals.rows} 条记录（历史 ${r.totals.history_rows} · 核对 ${r.totals.recon_rows}），金额合计 ${Number(r.totals.amount).toFixed(2)} 元；ZIP 名称：${r.zip_name}`;
+    let h='<div class="audit-box"><div class="audit-title">将打包的文件清单（分表为标准录入模板 9 列，可直接回灌）</div><div class="audit-scroll">'+
+          '<table class="audit-table"><thead><tr><th>文件名</th><th>类型</th><th>供应商</th><th>期间</th><th>行数</th><th>日期范围</th><th>金额合计</th><th>日期补齐</th></tr></thead><tbody>';
+    r.files.forEach(x=>{
+      h+=`<tr><td>${esc(x.name)}</td><td>${esc(x.kind_label)}</td><td>${esc(x.supplier)}</td><td>${esc(x.month)}</td>
+        <td>${x.rows}</td><td>${esc(x.date_from||'—')} ~ ${esc(x.date_to||'—')}</td>
+        <td>${Number(x.amount).toFixed(2)}</td><td>${x.date_filled||0}</td></tr>`;
+    });
+    box.innerHTML=h+'</tbody></table></div></div>';
+  }catch(e){ msg.className='msg error'; msg.textContent='预览失败：'+e.message; }
+});
+
+$('#btnBkDownload').addEventListener('click',()=>{
+  const f=bkFilters(), msg=$('#bkMsg');
+  if(!f.kinds){ toast('请至少选择一种账单类型'); return; }
+  msg.className='msg ok';
+  msg.textContent='正在打包，浏览器会自动下载 ZIP…';
+  window.location.href='/api/history/backup?'+bkQuery();
+});
 
 // ===== 管理员权限（清空历史库） =====
 function applyAdminUI(){

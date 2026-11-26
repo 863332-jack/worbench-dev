@@ -14,6 +14,7 @@
 - B-6 启动时按保留策略清理超期上传/导出文件。
 """
 import os
+import re
 import json
 import time
 import secrets
@@ -28,6 +29,8 @@ import db
 import matcher
 import exporter
 import validator
+import backup
+import recon_stats
 
 app = Flask(__name__)
 
@@ -340,6 +343,63 @@ def api_supplier_delete(sid):
                    msg="供应商「%s」已删除" % name)
 
 
+# ---------- 账单备份：按条件筛选 → 打包下载（可归档、可回灌） ----------
+
+def _backup_filters(args):
+    """解析备份筛选条件（GET 查询串）：账单类型 / 供应商 / 月份范围。"""
+    kinds = [k for k in (args.get("kinds") or "").split(",") if k in ("history", "recon")]
+    if not kinds:
+        kinds = ["history"]
+    suppliers = [s.strip() for s in (args.get("suppliers") or "").split(",") if s.strip()]
+    month_from = (args.get("month_from") or "").strip()
+    month_to = (args.get("month_to") or "").strip()
+    bad = [m for m in (month_from, month_to) if m and not re.match(r"^\d{4}-\d{2}$", m)]
+    if bad:
+        raise ValueError("月份格式应为 YYYY-MM（如 2026-07），收到：%s" % "、".join(bad))
+    if month_from and month_to and month_from > month_to:
+        raise ValueError("起始月份（%s）不能晚于结束月份（%s）" % (month_from, month_to))
+    return {
+        "kinds": kinds,
+        "suppliers": suppliers,
+        "month_from": month_from,
+        "month_to": month_to,
+        "include_excluded": (args.get("include_excluded") or "") in ("1", "true", "on"),
+    }
+
+
+@app.route("/api/history/backup/preview")
+def api_backup_preview():
+    """导出前预览：将生成多少文件、多少行、金额合计，避免导出一个空包。"""
+    try:
+        filters = _backup_filters(request.args)
+        files, _groups = backup.plan(filters)
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    return jsonify(ok=True, files=files,
+                   totals={"files": len(files),
+                           "rows": sum(f["rows"] for f in files),
+                           "amount": round(sum(f["amount"] for f in files), 2),
+                           "history_rows": sum(f["rows"] for f in files if f["kind"] == "history"),
+                           "recon_rows": sum(f["rows"] for f in files if f["kind"] == "recon")},
+                   zip_name=backup.zip_name(filters))
+
+
+@app.route("/api/history/backup")
+def api_backup_download():
+    """按条件打包下载（ZIP：分表 + 备份清单.csv/json + 恢复说明.txt）。"""
+    try:
+        filters = _backup_filters(request.args)
+        path, manifest = backup.build(filters)
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    except Exception as e:
+        log.exception("账单备份打包失败")
+        return jsonify(ok=False, error="备份打包失败：%s" % e), 500
+    log.info("账单备份：%s（%d 个文件 / %d 条记录）", os.path.basename(path),
+             manifest["totals"]["files"], manifest["totals"]["rows"])
+    return send_file(path, as_attachment=True, download_name=os.path.basename(path))
+
+
 # ---------- 入口2：新账单核对 ----------
 @app.route("/api/reconcile", methods=["POST"])
 def api_reconcile():
@@ -375,7 +435,9 @@ def api_reconcile():
                        errors=all_errors, warnings=all_warnings), 400
 
     # === 阶段二：逐文件核对并单事务入库（单文件失败即回滚该批次，不影响其它文件） ===
-    batches, all_counts = [], {"total": 0, "matched": 0, "review": 0, "above": 0, "nohistory": 0, "error": 0}
+    batches, all_counts = [], {"total": 0, "matched": 0, "review": 0, "above": 0,
+                               "nohistory": 0, "error": 0, "diff": 0,
+                               "overpay": 0.0, "underpay": 0.0}
     for fname, review in staged:
         recon_no = db.new_no("R")
         rows = review["rows"]
@@ -402,10 +464,13 @@ def api_reconcile():
                         "supplier": review["meta"]["supplier"],
                         "total_rows": counts["total"], "matched": counts["matched"],
                         "review": counts["review"], "above": counts["above"],
-                        "nohistory": counts["nohistory"], "error": counts["error"]})
-        log.info("核对完成：%s 批次 %s 总 %d / 匹配 %d / 复核 %d / 高于 %d / 无历史 %d / 解析失败 %d",
+                        "nohistory": counts["nohistory"], "error": counts["error"],
+                        "diff": counts["diff"], "overpay": counts["overpay"],
+                        "underpay": counts["underpay"]})
+        log.info("核对完成：%s 批次 %s 总 %d / 匹配 %d / 复核 %d / 高于 %d / 无历史 %d / 解析失败 %d / 差异 %d 笔 超付 %.2f",
                  fname, recon_no, counts["total"], counts["matched"], counts["review"],
-                 counts["above"], counts["nohistory"], counts["error"])
+                 counts["above"], counts["nohistory"], counts["error"], counts["diff"],
+                 counts["overpay"])
 
     return jsonify(ok=True, batches=batches, counts=all_counts,
                    total_results=sum(all_counts.values()), warnings=all_warnings)
@@ -421,7 +486,11 @@ def api_results(recon_no):
     batch = db.get_recon_batch(recon_no)
     if not batch:
         return jsonify(ok=False, error="核对批次不存在"), 404
-    results = db.get_results(recon_no, request.args.get("status"))
+    status = request.args.get("status")
+    diff = request.args.get("diff")     # 差异类型筛选（如 amt_high / base_stale）
+    results = db.get_results(recon_no, status)
+    if diff:
+        results = [r for r in results if diff in str(r.get("diff_types") or "").split(",")]
     # 解析上传表头与每行原始值，供前端按上传表头展示核对明细
     try:
         headers = json.loads(batch.get("headers_json") or "[]")
@@ -433,10 +502,21 @@ def api_results(recon_no):
         except Exception:
             r["raw_values"] = []
         r.pop("raw_values_json", None)
+        r["diff_list"] = [c for c in str(r.get("diff_types") or "").split(",") if c]
     batch_out = dict(batch)
     batch_out.pop("headers_json", None)
     batch_out.pop("mapping_diff_json", None)
-    return jsonify(ok=True, batch=batch_out, results=results, headers=headers)
+    # 统计口径统一由 recon_stats 计算（页面与 Excel 共用一套），且永远基于整批而非筛选结果
+    summary = recon_stats.summarize(db.get_results(recon_no))
+    return jsonify(ok=True, batch=batch_out, results=results, headers=headers, summary=summary)
+
+
+@app.route("/api/results/<recon_no>/summary")
+def api_results_summary(recon_no):
+    """仅取统计（筛选/刷新时避免重复拉明细）。"""
+    if not db.get_recon_batch(recon_no):
+        return jsonify(ok=False, error="核对批次不存在"), 404
+    return jsonify(ok=True, summary=recon_stats.summarize(db.get_results(recon_no)))
 
 
 @app.route("/api/download/<recon_no>")
