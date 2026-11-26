@@ -17,6 +17,7 @@ import os
 import re
 import json
 import time
+import shutil
 import secrets
 import logging
 from logging.handlers import RotatingFileHandler
@@ -33,6 +34,9 @@ import backup
 import recon_stats
 
 app = Flask(__name__)
+# 会话安全：HttpOnly 防 JS 读 cookie；SameSite=Lax 防跨站提交（管理员登录/清空等敏感操作）
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 
 # ---------- 静态资源版本号：取 style.css / app.js 的修改时间 ----------
@@ -155,15 +159,23 @@ def save_upload(file):
 
 
 def cleanup_uploads(paths):
-    """审查失败时清理本次上传的临时文件。"""
+    """审查失败时清理本次上传的临时文件。
+
+    上传子目录按批次编号独占（save_upload），删除文件后若目录已空，
+    直接递归删掉整个子目录；os.rmdir 在个别环境会被拦截失败，
+    用 rmtree 兜底，避免空目录残留到下次 housekeeping。
+    """
     for p in paths:
         try:
             os.remove(p)
-            parent = os.path.dirname(p)
-            if not os.listdir(parent):
-                os.rmdir(parent)
         except OSError:
             pass
+        parent = os.path.dirname(p)
+        if parent and os.path.isdir(parent) and not os.listdir(parent):
+            try:
+                os.rmdir(parent)
+            except OSError:
+                shutil.rmtree(parent, ignore_errors=True)
 
 
 def housekeeping():

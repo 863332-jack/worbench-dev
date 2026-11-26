@@ -17,6 +17,7 @@ import uuid
 import hashlib
 import zipfile
 import tempfile
+import shutil
 from datetime import datetime
 from io import StringIO
 
@@ -264,14 +265,8 @@ def build(filters):
             zf.writestr("备份清单.json", json.dumps(manifest, ensure_ascii=False, indent=2))
             zf.writestr("恢复说明.txt", restore_txt)
     finally:
-        for f in os.listdir(tmpdir):
-            try:
-                os.remove(os.path.join(tmpdir, f))
-            except OSError:
-                pass
-        try:
-            os.rmdir(tmpdir)
-        except OSError:
-            pass
+        # 标准清理：递归删除临时目录，忽略错误（个别环境对 rmdir 的拦截
+        # 会导致目录残留，ignore_errors 保证导出主流程不受影响）。
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
     return path, manifest

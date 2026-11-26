@@ -7,7 +7,7 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 let state = { histFiles: [], rcFiles: [], currentRecon: '', currentStatus: '', currentDiff: '',
-              isAdmin: false, suppliers: [], supOpener: '', tab: 'history' };
+              isAdmin: false, suppliers: [], supOpener: '', tab: 'history', resultPage: 1 };
 
 const BTN_HIST_TEXT = '上传并校验（追加）';
 const BTN_RC_TEXT = '开始核对';
@@ -228,11 +228,14 @@ async function loadResultBatches(){
 $('#resultBatch').addEventListener('change',()=>{
   state.currentRecon=$('#resultBatch').value;
   state.currentDiff='';   // 换批次时清掉差异筛选，避免筛出空表
+  state.resultPage=1;     // 换批次回到第一页
   loadResults();
 });
 $$('#resultFilters .chip').forEach(chip=>chip.addEventListener('click',()=>{
   $$('#resultFilters .chip').forEach(c=>c.classList.toggle('active',c===chip));
-  state.currentStatus=chip.dataset.status; loadResults();
+  state.currentStatus=chip.dataset.status;
+  state.resultPage=1;     // 换筛选回到第一页
+  loadResults();
 }));
 
 async function loadResults(){
@@ -270,30 +273,43 @@ async function loadResults(){
     if(!r.results.length){ el.innerHTML='<div class="empty">当前筛选无记录</div>'; return; }
     // 明细表头严格按上传账单原表头
     const headers = r.headers && r.headers.length ? r.headers : ['供应商','型号','材质','尺寸','单价','备注'];
-    let h='<div class="detail-note">核对明细表头与上传账单完全一致（'+headers.length+' 列）；行底色标识核对状态</div>';
+    // 分页：长批次一次铺几千行 DOM 会卡，每页 50 行；序号跨页连续
+    const PER=50;
+    const total=r.results.length;
+    const maxPage=Math.max(1,Math.ceil(total/PER));
+    if(!state.resultPage||state.resultPage<1) state.resultPage=1;
+    if(state.resultPage>maxPage) state.resultPage=maxPage;
+    const pg=state.resultPage;
+    const start=(pg-1)*PER;
+    const rows=r.results.slice(start,start+PER);
+    let h='<div class="detail-note">核对明细表头与上传账单完全一致（'+headers.length+' 列）；行底色标识核对状态'
+      +(total>PER?('；已分页，每页 '+PER+' 行'):'')+'</div>';
     h+='<table><thead><tr><th>#</th>'+headers.map(x=>`<th>${esc(x)}</th>`).join('')+'<th>核对状态</th></tr></thead><tbody>';
-    r.results.forEach((x,i)=>{
+    rows.forEach((x,i)=>{
       const vals = (x.raw_values||[]).slice(0,headers.length);
       while(vals.length<headers.length) vals.push('');
       const cls = STATUS_CLS[x.status]||'';
-      h+=`<tr class="${cls}"><td>${i+1}</td>`+vals.map(v=>`<td>${esc(v==null?'':v)}</td>`).join('')+
+      h+=`<tr class="${cls}"><td>${start+i+1}</td>`+vals.map(v=>`<td>${esc(v==null?'':v)}</td>`).join('')+
          `<td class="${cls}">${STATUS_LABEL[x.status]||esc(x.status)}</td></tr>`;
     });
     h+='</tbody></table>';
+    h+=pagerHtml(total, pg, maxPage);
     // 差异与依据（派生信息，不并入明细表头）
     h+='<div class="detail-evidence"><div class="audit-title">差异明细与核对依据（派生信息，不在上传账单表头中）</div>'+
        '<table><thead><tr><th>#</th><th>型号</th><th>本单单价</th><th>历史最低价</th><th>单价差异</th><th>差异率</th>'+
        '<th>数量</th><th>金额差异</th><th>基准期间</th><th>差异类型</th><th>状态</th><th>依据与复核原因</th></tr></thead><tbody>';
-    r.results.forEach((x,i)=>{
+    rows.forEach((x,i)=>{
       const tags=(x.diff_list||[]).map(c=>`<span class="difftag">${esc(DIFF_LABEL[c]||c)}</span>`).join('')||'—';
-      h+=`<tr><td>${i+1}</td><td>${esc(x.model||'—')}</td><td>${money(x.bill_price)}</td><td>${money(x.lowest_price)}</td>
+      h+=`<tr><td>${start+i+1}</td><td>${esc(x.model||'—')}</td><td>${money(x.bill_price)}</td><td>${money(x.lowest_price)}</td>
         <td>${gapCell(x.price_gap)}</td><td>${pct(x.gap_rate)}</td><td>${fmt(x.quantity)}</td><td>${gapCell(x.amount_gap)}</td>
         <td>${esc(x.hist_period||'—')}</td><td>${tags}</td>
         <td class="${STATUS_CLS[x.status]||''}">${STATUS_LABEL[x.status]||esc(x.status)}</td>
         <td class="cell-evidence">${esc(x.evidence||'—')}${x.reason?('<br><span class="cell-reason">'+esc(x.reason)+'</span>'):''}</td></tr>`;
     });
     h+='</tbody></table></div>';
+    h+=pagerHtml(total, pg, maxPage);
     el.innerHTML=h;
+    bindPager();
   }catch(e){ $('#resultTable').innerHTML='<div class="empty">结果加载失败，请刷新重试</div>'; }
 }
 
@@ -303,6 +319,30 @@ function gapCell(v){
   if(v===null||v===undefined||v===''||Math.abs(Number(v))<0.0001) return '—';
   const n=Number(v), cls=n>0?'gap-up':'gap-down';
   return `<span class="${cls}">${n>0?'+':''}${n.toFixed(2)}</span>`;
+}
+// 分页控件：两条长表共用同一份页码状态（state.resultPage），翻页后两表同步
+function pagerHtml(total, page, maxPage){
+  let h='<div class="pager">';
+  h+=`<button class="pg-btn" data-pg="${page-1}"${page<=1?' disabled':''}>‹ 上一页</button>`;
+  h+=`<span class="pg-info">第 <b>${page}</b> / ${maxPage} 页 · 共 <b>${total}</b> 行</span>`;
+  h+=`<button class="pg-btn" data-pg="${page+1}"${page>=maxPage?' disabled':''}>下一页 ›</button>`;
+  if(maxPage>7){
+    h+=`<span class="pg-info">跳至</span><input type="text" class="pg-jump" placeholder="${page}">`;
+  }
+  h+='</div>';
+  return h;
+}
+function bindPager(){
+  $$('#resultTable .pg-btn').forEach(b=>b.addEventListener('click',()=>{
+    const p=parseInt(b.dataset.pg,10);
+    if(p>=1){ state.resultPage=p; loadResults(); }
+  }));
+  $$('#resultTable .pg-jump').forEach(inp=>inp.addEventListener('keydown',e=>{
+    if(e.key!=='Enter') return;
+    const p=parseInt(inp.value,10);
+    if(p>=1){ state.resultPage=p; loadResults(); }
+    else inp.value='';
+  }));
 }
 
 function renderSupplierSummary(s){
@@ -332,7 +372,9 @@ function renderDiffChips(s){
   });
   el.innerHTML=h;
   $$('#diffFilters .chip').forEach(c=>c.addEventListener('click',()=>{
-    state.currentDiff=c.dataset.diff||''; loadResults();
+    state.currentDiff=c.dataset.diff||'';
+    state.resultPage=1;   // 换差异筛选回到第一页
+    loadResults();
   }));
 }
 
@@ -604,7 +646,7 @@ if(bkPrevBtn) bkPrevBtn.addEventListener('click',async()=>{
   if(bkDenyIfNotAdmin(msg)) return;
   const f=bkFilters();
   if(!f.kinds){ toast('请至少选择一种账单类型'); return; }
-  msg.className='msg'; msg.textContent='正在统计…'; box.innerHTML='';
+  msg.className='msg plain'; msg.textContent='正在统计…'; box.innerHTML='';
   try{
     const resp=await fetch('/api/history/backup/preview?'+bkQuery());
     const r=await resp.json().catch(()=>({}));
@@ -637,8 +679,8 @@ if(bkDlBtn) bkDlBtn.addEventListener('click',async()=>{
   const f=bkFilters();
   if(!f.kinds){ toast('请至少选择一种账单类型'); return; }
   const btns=[bkPrevBtn,bkDlBtn].filter(Boolean);
-  btns.forEach(b=>b.disabled=true);
-  msg.className='msg'; msg.textContent='正在打包，请稍候…';
+  btns.forEach(b=>{ b.disabled=true; if(b===bkDlBtn) b.innerHTML='<span class="loading"></span>正在打包…'; });
+  msg.className='msg plain'; msg.textContent='正在生成备份包（按供应商分表、全部历史记录），请稍候…';
   try{
     const resp=await fetch('/api/history/backup?'+bkQuery());
     const ct=resp.headers.get('Content-Type')||'';
@@ -671,7 +713,8 @@ if(bkDlBtn) bkDlBtn.addEventListener('click',async()=>{
     msg.className='msg error';
     msg.textContent=e.message||'导出失败';
   }finally{
-    btns.forEach(b=>b.disabled=false);
+    btns.forEach(b=>{ b.disabled=false; });
+    if(bkDlBtn) bkDlBtn.textContent='打包下载 ZIP';
   }
 });
 

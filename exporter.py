@@ -5,6 +5,7 @@
 """
 import os
 import json
+import uuid
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -309,6 +310,12 @@ def export_results(recon_no, results, batch):
         a = ws5.cell(row=i, column=1, value=k); a.font = Font(bold=True); a.border = border
         b = ws5.cell(row=i, column=2, value=v); b.alignment = Alignment(wrap_text=True, vertical="center"); b.border = border
 
+    # 原子落盘：先写临时文件再替换。两个人同时点「下载结果 Excel」时，
+    # 若直接写目标路径，先拿到句柄的那个可能读到写了一半的文件。
+    # 临时文件名必须线程级唯一（threaded=True 下并发请求同属一个进程，
+    # 仅用 PID 会重名，导致两个线程互写同一 tmp 文件、os.replace 竞态）。
     path = os.path.join(OUTPUT_DIR, "核对结果_%s.xlsx" % recon_no)
-    wb.save(path)
+    tmp = "%s.tmp_%d_%s" % (path, os.getpid(), uuid.uuid4().hex[:8])
+    wb.save(tmp)
+    os.replace(tmp, path)
     return path

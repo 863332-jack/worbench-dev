@@ -32,10 +32,16 @@ h1{ font-size:20px; font-weight:650; }
 .card-head{ display:flex; align-items:flex-start; justify-content:space-between; gap:16px; margin-bottom:16px; }
 .muted{ color:var(--muted); font-size:12px; font-weight:400; }
 .head-actions{ display:flex; gap:10px; align-items:center; }
-.form-row{ display:flex; align-items:center; gap:14px; margin-bottom:14px; }
-.form-row label{ font-weight:550; white-space:nowrap; }
-select,input[type=text]{ padding:9px 12px; border:1px solid var(--line); border-radius:8px; font-size:13px;
-  background:#fff; color:var(--text); min-width:180px; }
+.form-row{ display:flex; align-items:center; gap:14px; margin-bottom:14px;
+  flex-wrap:wrap; row-gap:10px; }
+/* 标签定宽对齐：同一张卡片里多行表单的控件左边界对齐，不会因标签字数参差错位 */
+.form-row>label{ font-weight:550; white-space:nowrap; flex:0 0 88px; }
+.form-row>label.chk{ flex:0 0 auto; }
+select,input[type=text],input[type=month]{ padding:9px 12px; border:1px solid var(--line); border-radius:8px; font-size:13px;
+  background:#fff; color:var(--text); min-width:180px; transition:border-color .15s, box-shadow .15s; }
+select:focus,input:focus{ outline:none; border-color:var(--primary); box-shadow:0 0 0 3px rgba(47,111,237,.14); }
+input[type=month]{ min-width:150px; }
+input[type=checkbox],input[type=radio]{ accent-color:var(--primary); }
 
 .dropzone{ border:1.5px dashed #b9c6d8; border-radius:12px; padding:34px; text-align:center;
   background:#fafdff; cursor:pointer; transition:.15s; }
@@ -49,7 +55,10 @@ select,input[type=text]{ padding:9px 12px; border:1px solid var(--line); border-
   border-radius:8px; padding:8px 12px; font-size:13px; }
 .fileitem .x{ margin-left:auto; color:var(--muted); cursor:pointer; }
 .actions{ display:flex; gap:10px; margin-top:16px; }
-.btn{ padding:10px 20px; border-radius:8px; font-size:13px; font-weight:550; cursor:pointer; border:1px solid transparent; }
+.btn{ padding:10px 20px; border-radius:8px; font-size:13px; font-weight:550; cursor:pointer; border:1px solid transparent;
+  transition:background .15s, border-color .15s, box-shadow .15s; }
+.btn:focus-visible{ outline:none; box-shadow:0 0 0 3px rgba(47,111,237,.25); }
+.btn:active{ transform:translateY(1px); }
 .btn.primary{ background:var(--primary); color:#fff; } .btn.primary:hover{ background:var(--primary-d); }
 .btn.primary:disabled{ background:#9db8f0; cursor:not-allowed; }
 .btn.ghost:disabled{ color:#b6bfcc; border-color:var(--line); background:#f7f9fc; cursor:not-allowed; }
@@ -64,6 +73,8 @@ select,input[type=text]{ padding:9px 12px; border:1px solid var(--line); border-
 .msg{ margin-top:12px; font-size:13px; }
 .msg.error{ color:var(--red); background:var(--red-bg); padding:10px 14px; border-radius:8px; }
 .msg.ok{ color:var(--green); background:var(--green-bg); padding:10px 14px; border-radius:8px; }
+/* 过程提示（"正在统计/打包"）：浅底、不抢眼，完成后被 ok/error 覆盖 */
+.msg.plain{ padding:10px 14px; border-radius:8px; background:#f2f5fa; color:#455062; }
 .report{ margin-top:14px; }
 .report-item{ border:1px solid var(--line); border-radius:8px; padding:12px 14px; margin-bottom:8px; font-size:13px; }
 .report-item.bad{ border-color:#f0c9c9; background:var(--red-bg); }
@@ -72,10 +83,13 @@ select,input[type=text]{ padding:9px 12px; border:1px solid var(--line); border-
 .badge.ok{ background:var(--green-bg); color:var(--green); }
 .badge.bad{ background:var(--red-bg); color:var(--red); }
 
-.tablewrap{ overflow:auto; border:1px solid var(--line); border-radius:10px; }
+.tablewrap{ overflow:auto; border:1px solid var(--line); border-radius:10px;
+  /* 长表不把页面撑爆：内部滚动 + 表头吸顶（分页式浏览体验，小表不受影响） */
+  max-height:620px; }
 table{ width:100%; border-collapse:collapse; font-size:12.5px; }
 th{ background:#f2f5fa; text-align:left; padding:10px 12px; font-weight:600; color:#455; white-space:nowrap;
-  position:sticky; top:0; border-bottom:1px solid var(--line); }
+  position:sticky; top:0; z-index:1; border-bottom:1px solid var(--line); }
+th::after{ content:''; }
 td{ padding:9px 12px; border-bottom:1px solid #eef1f5; vertical-align:top; }
 tr:last-child td{ border-bottom:none; }
 tr:hover td{ background:#fafcff; }
@@ -206,3 +220,42 @@ tr.st-err td{ background:var(--red-bg); }
 .admin-state{ color:var(--muted); flex:1; }
 .admin-state.is-admin{ color:var(--green); font-weight:600; }
 .btn.small{ padding:5px 10px; font-size:11.5px; }
+
+/* ── 分页控件（结果明细等长表）── */
+.pager{ display:flex; align-items:center; gap:10px; margin-top:10px; font-size:12.5px; color:var(--muted);
+  flex-wrap:wrap; }
+.pager .pg-btn{ padding:5px 12px; border:1px solid var(--line); background:#fff; border-radius:8px;
+  cursor:pointer; font-size:12.5px; color:#455; }
+.pager .pg-btn:hover:not(:disabled){ border-color:var(--primary); color:var(--primary); }
+.pager .pg-btn:disabled{ color:#b6bfcc; background:#f7f9fc; cursor:not-allowed; }
+.pager .pg-info{ font-variant-numeric:tabular-nums; }
+.pager .pg-jump{ padding:4px 8px; width:56px; min-width:0; text-align:center; }
+.pager b{ color:var(--text); }
+
+/* ── 响应式：窗口变窄时不再横向溢出 ── */
+@media (max-width:1000px){
+  .app{ padding:16px 14px 48px; }
+  .card{ padding:18px 16px; }
+  .stat{ min-width:calc(50% - 12px); }
+  .form-row{ gap:10px 12px; }
+  .tablewrap{ max-height:520px; }
+  .cell-evidence{ max-width:280px; }
+}
+@media (max-width:720px){
+  .topbar{ flex-direction:column; align-items:flex-start; gap:10px; }
+  .tabs{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .tabs .tab{ white-space:nowrap; }
+  .card-head{ flex-direction:column; gap:6px; }
+  .card-head .head-actions{ margin-top:4px; }
+  .form-row>label{ flex:0 0 100%; }
+  select,input[type=text],input[type=month]{ min-width:0; width:100%; }
+  .form-row>label.chk{ flex:0 0 auto; }
+  .actions{ flex-wrap:wrap; }
+  .btn{ padding:9px 16px; }
+  .stat{ min-width:100%; }
+  .audit-scroll{ max-height:340px; }
+  .ev{ flex-wrap:wrap; row-gap:2px; }
+  .fold-hint{ padding:2px 8px; }
+  .dropzone{ padding:22px; }
+  .modal-box{ padding:18px; }
+}
