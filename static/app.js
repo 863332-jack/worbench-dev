@@ -478,6 +478,10 @@ async function loadSupplierHistory(){
 
 function renderSupplierHistory(r){
   const s=r.summary||{}, rows=r.rows||[], events=r.events||[];
+  const cnt=$('#foldSupHistCount');
+  if(cnt) cnt.textContent = s.periods
+    ? `${s.periods} 个有效期间 · ${s.rows_valid||0} 条有效明细`
+    : (s.periods_expired ? '当前无有效期间' : '暂无数据');
   $('#shStats').innerHTML=`
     <div class="stat"><div class="n">${s.periods||0}</div><div class="l">有效期间数</div>
       <div class="hint">覆盖：${esc((s.suppliers||[]).join('、')||'—')}</div></div>
@@ -534,7 +538,9 @@ $('#btnShQuery').addEventListener('click',loadSupplierHistory);
 ['#shSupplier','#shFrom','#shTo','#shHideExpired'].forEach(sel=>{
   $(sel).addEventListener('change',loadSupplierHistory);
 });
-$('#btnSupHistRebuild').addEventListener('click',async()=>{
+$('#btnSupHistRebuild').addEventListener('click',async(ev)=>{
+  // 这个按钮在 <summary> 里：只做重建，不能顺带把整块折叠区展开/收起
+  ev.preventDefault(); ev.stopPropagation();
   if(!state.isAdmin){ toast('需要管理员权限'); return; }
   try{
     const r=await fetch('/api/suppliers/history/rebuild',{method:'POST'}).then(x=>x.json());

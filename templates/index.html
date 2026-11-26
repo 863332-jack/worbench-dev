@@ -71,33 +71,38 @@
       </details>
     </div>
     <div class="card">
-      <div class="card-head">
-        <div><h2>供应商历史有效数据</h2>
-          <p class="muted">按「供应商 × 期间」保存历史有效数据：数据时间、来源、状态变化与关键指标。数据新增/变更/失效后自动刷新，同一期间不会重复写入，无效或失效期间不计入有效记录。</p></div>
-        <div class="head-actions">
-          <button class="btn ghost small" id="btnSupHistRebuild" style="display:none">重建台账</button>
-        </div>
-      </div>
-      <div class="form-row">
-        <label>供应商</label>
-        <select id="shSupplier"><option value="">全部供应商</option></select>
-        <label>月份</label>
-        <input type="month" id="shFrom"> <span class="muted">至</span>
-        <input type="month" id="shTo">
-        <label class="chk"><input type="checkbox" id="shHideExpired"> 只看有效（隐藏已失效期间）</label>
-        <button class="btn ghost small" id="btnShQuery">查询</button>
-      </div>
-      <div class="statcards" id="shStats"></div>
-      <div class="tablewrap" id="shTable"><div class="empty">加载中…</div></div>
-      <details class="fold fold-sub" id="foldEvents">
+      <details class="fold" id="foldSupHist">
         <summary class="fold-head">
           <span class="fold-ico" aria-hidden="true"></span>
-          <h3>历史记录</h3>
-          <span class="fold-count" id="foldEventsCount"></span>
-          <span class="fold-hint" data-closed="展开查看" data-open="收起历史记录"></span>
+          <h2>供应商历史有效数据</h2>
+          <span class="fold-count" id="foldSupHistCount"></span>
+          <span class="fold-hint" data-closed="展开台账" data-open="收起台账"></span>
+          <button class="btn ghost small" id="btnSupHistRebuild" style="display:none">重建台账</button>
         </summary>
         <div class="fold-body">
-          <div class="report" id="shEvents"></div>
+          <p class="muted fold-desc">按「供应商 × 期间」保存历史有效数据：数据时间、来源、状态变化与关键指标。数据新增/变更/失效后自动刷新，同一期间不会重复写入，无效或失效期间不计入有效记录。</p>
+          <div class="form-row">
+            <label>供应商</label>
+            <select id="shSupplier"><option value="">全部供应商</option></select>
+            <label>月份</label>
+            <input type="month" id="shFrom"> <span class="muted">至</span>
+            <input type="month" id="shTo">
+            <label class="chk"><input type="checkbox" id="shHideExpired"> 只看有效（隐藏已失效期间）</label>
+            <button class="btn ghost small" id="btnShQuery">查询</button>
+          </div>
+          <div class="statcards" id="shStats"></div>
+          <div class="tablewrap" id="shTable"><div class="empty">加载中…</div></div>
+          <details class="fold fold-sub" id="foldEvents">
+            <summary class="fold-head">
+              <span class="fold-ico" aria-hidden="true"></span>
+              <h3>历史记录</h3>
+              <span class="fold-count" id="foldEventsCount"></span>
+              <span class="fold-hint" data-closed="展开查看" data-open="收起历史记录"></span>
+            </summary>
+            <div class="fold-body">
+              <div class="report" id="shEvents"></div>
+            </div>
+          </details>
         </div>
       </details>
     </div>

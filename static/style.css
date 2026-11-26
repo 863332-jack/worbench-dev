@@ -165,6 +165,9 @@ input[type=month]{ padding:8px 10px; border:1px solid var(--line); border-radius
 .fold-body{ margin-top:14px; }
 .fold-sub{ margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }
 .fold-sub>.fold-body{ margin-top:12px; }
+.fold-desc{ margin:0 0 14px; line-height:1.6; }
+/* summary 里的操作按钮：固定尺寸，不随标题伸缩；点击由 JS 拦截，不触发折叠 */
+.fold-head .btn{ flex:0 0 auto; }
 .detail-evidence{ margin-top:18px; }
 tr.st-match td{ background:var(--green-bg); }
 tr.st-review td{ background:var(--orange-bg, #fdf0e6); }
