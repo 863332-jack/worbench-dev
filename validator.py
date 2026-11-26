@@ -25,8 +25,19 @@ def cell_json_value(v):
 
 TEMPLATE_HEADERS = ["供应商", "日期", "型号", "尺寸", "材质", "数量", "单价", "合计金额", "备注"]
 REQUIRED = ("供应商", "日期", "型号", "单价")
-SUPPLIERS = ("杰盛", "新新精密", "云锦")
 EXCLUDE_WORDS = ("待核", "待确认", "待定", "报价", "不详", "N/A", "NA")
+
+
+def supplier_whitelist():
+    """可接受的供应商名单：以数据库 supplier 主数据为准（不再硬编码）。
+
+    新增供应商后无需改代码；主数据不可用时返回空列表，交由调用方跳过白名单校验。
+    """
+    try:
+        import db
+        return db.supplier_names()
+    except Exception:
+        return []
 
 NUM_RE = re.compile(r"^\d+(?:\.\d+)?$")
 DATE_FORMATS = ("%Y-%m-%d", "%Y/%m/%d", "%Y.%m.%d", "%Y年%m月%d日", "%Y年%m月", "%Y-%m")
@@ -133,6 +144,9 @@ def validate_file(path, supplier_override="", kind="history"):
 
     clean = []
     seen_example = False
+    # 名单在文件校验开始时取一次：既保证新增供应商立即生效，也避免逐行查库
+    suppliers = supplier_whitelist()
+    suppliers_text = " / ".join(suppliers) if suppliers else "（尚未建立供应商档案）"
 
     for idx in range(hi + 1, len(rows)):
         row = rows[idx]
@@ -155,11 +169,12 @@ def validate_file(path, supplier_override="", kind="history"):
         supplier = parsers.cell_str(rec["供应商"]).strip()
         if not supplier:
             err(excel_row, "供应商", "", "必填项「供应商」为空",
-                "可能漏填；请下拉选择 杰盛 / 新新精密 / 云锦 之一。")
+                "可能漏填；请下拉选择 %s 之一。" % suppliers_text)
             row_ok = False
-        elif supplier not in SUPPLIERS:
-            err(excel_row, "供应商", supplier, "供应商必须是：%s 之一" % " / ".join(SUPPLIERS),
-                "常见原因：使用简称/别名（如「云景」「新新」）、错别字或多余空格；请用下拉框重新选择。")
+        elif suppliers and supplier not in suppliers:
+            err(excel_row, "供应商", supplier, "供应商必须是：%s 之一" % suppliers_text,
+                "常见原因：使用简称/别名（如「云景」「新新」）、错别字或多余空格；"
+                "请用下拉框重新选择。若为新供应商，请先在「供应商管理」中新增后再上传。")
             row_ok = False
         elif supplier_override and supplier_override != supplier:
             err(excel_row, "供应商", supplier,

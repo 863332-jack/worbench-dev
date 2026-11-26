@@ -138,6 +138,10 @@ tr.st-err td{ background:var(--red-bg); }
 .modal.show{ display:flex; }
 .modal-box{ width:min(480px,92vw); background:#fff; border-radius:12px; padding:24px; box-shadow:0 12px 40px rgba(0,0,0,.15); }
 .modal-box h3{ font-size:16px; margin-bottom:8px; }
+.modal-box.wide{ width:min(760px,94vw); max-height:88vh; overflow:auto; }
+.modal-box .form-row label{ min-width:104px; }
+.modal-box input[type=text]{ flex:1; min-width:0; }
+.modal-box #supList{ max-height:260px; }
 .del-target{ margin:12px 0; padding:10px 12px; background:var(--red-bg); border-radius:6px; font-size:13px; }
 .admin-strip{ display:flex; align-items:center; gap:10px; margin:10px 0; padding:9px 12px; background:#f8fafc; border:1px solid var(--line); border-radius:8px; font-size:12.5px; }
 .admin-state{ color:var(--muted); flex:1; }

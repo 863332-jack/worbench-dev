@@ -6,7 +6,8 @@
 // - 补充异步加载容错与「解析失败」筛选。
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
-let state = { histFiles: [], rcFiles: [], currentRecon: '', currentStatus: '', isAdmin: false };
+let state = { histFiles: [], rcFiles: [], currentRecon: '', currentStatus: '', isAdmin: false,
+              suppliers: [], supOpener: '' };
 
 const BTN_HIST_TEXT = '上传并校验（追加）';
 const BTN_RC_TEXT = '开始核对';
@@ -256,14 +257,131 @@ $('#btnDownload').addEventListener('click',()=>{
   window.location.href='/api/download/'+no;
 });
 
+// ===== 供应商主数据（可扩展：新增后下拉/校验名单自动更新） =====
+function supplierTableHTML(){
+  if(!state.suppliers.length){
+    return '<div class="empty">暂无供应商，请点击「＋ 新增供应商」添加</div>';
+  }
+  let h='<table><thead><tr><th>供应商名称</th><th>别名</th><th>备注</th><th>历史记录</th><th>核对记录</th><th>创建时间</th><th>操作</th></tr></thead><tbody>';
+  state.suppliers.forEach(s=>{
+    // 已被历史/核对引用的不允许删除（后端同样会拒绝），仅有管理员身份时显示删除按钮
+    const op = (!state.isAdmin) ? '—'
+      : (s.in_use ? '<span class="muted">使用中</span>'
+                  : `<button class="btn ghost small btn-del" data-del-sup="${s.id}">删除</button>`);
+    h+=`<tr><td><b>${esc(s.name)}</b></td><td>${esc(s.alias||'—')}</td><td>${esc(s.remark||'—')}</td>
+      <td>${s.hist_rows||0}</td><td>${s.recon_rows||0}</td><td>${esc(s.created_at||'—')}</td><td>${op}</td></tr>`;
+  });
+  return h+'</tbody></table>';
+}
+
+function renderSupplierTable(){
+  const html=supplierTableHTML();
+  ['#supTable','#supList'].forEach(id=>{ const el=$(id); if(el) el.innerHTML=html; });
+  $$('[data-del-sup]').forEach(b=>{ b.onclick=()=>deleteSupplier(b.dataset.delSup); });
+}
+
+function renderSupplierSelects(){
+  const opts=state.suppliers.map(s=>`<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('');
+  $$('.sup-select').forEach(el=>{
+    const cur=el.value;
+    el.innerHTML='<option value="">自动识别</option>'+opts+'<option value="__add__">＋ 新增供应商…</option>';
+    el.value=(cur && cur!=='__add__' && state.suppliers.some(s=>s.name===cur)) ? cur : '';
+  });
+}
+
+async function loadSuppliers(){
+  try{
+    const r=await fetch('/api/suppliers').then(x=>x.json());
+    if(!r.ok) throw new Error(r.error||'加载失败');
+    state.suppliers=r.suppliers||[];
+    renderSupplierSelects(); renderSupplierTable();
+  }catch(e){
+    const msg='<div class="empty">供应商加载失败，请刷新重试</div>';
+    ['#supTable','#supList'].forEach(id=>{ const el=$(id); if(el) el.innerHTML=msg; });
+  }
+}
+
+function openSupplierModal(openerSel){
+  state.supOpener=openerSel||'';
+  $('#supName').value=''; $('#supAlias').value=''; $('#supRemark').value='';
+  const m=$('#supMsg'); m.className='msg'; m.textContent='';
+  $('#supplierModal').classList.add('show');
+  if(!state.suppliers.length) loadSuppliers();
+  $('#supName').focus();
+}
+function closeSupplierModal(){ $('#supplierModal').classList.remove('show'); }
+
+$$('[data-open-sup]').forEach(b=>b.addEventListener('click',()=>{
+  const sel=b.closest('.form-row') ? b.closest('.form-row').querySelector('select') : null;
+  openSupplierModal(sel ? ('#'+sel.id) : '');
+}));
+// 下拉里选中「＋ 新增供应商…」即打开弹窗，而不是当成供应商提交
+$$('.sup-select').forEach(sel=>sel.addEventListener('change',()=>{
+  if(sel.value==='__add__'){ sel.value=''; openSupplierModal('#'+sel.id); }
+}));
+$('#btnSupCancel').addEventListener('click',closeSupplierModal);
+$('#supplierModal').addEventListener('click',e=>{ if(e.target===$('#supplierModal')) closeSupplierModal(); });
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape' && $('#supplierModal').classList.contains('show')) closeSupplierModal();
+});
+$('#supName').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); submitSupplier(); } });
+
+async function submitSupplier(){
+  const name=$('#supName').value.trim();
+  const alias=$('#supAlias').value.trim();
+  const remark=$('#supRemark').value.trim();
+  const msg=$('#supMsg');
+  // 前端先挡一道：必填 + 长度（后端仍会完整校验，双保险）
+  if(!name){ msg.className='msg error'; msg.textContent='「供应商名称」不能为空'; $('#supName').focus(); return; }
+  if(name.length>40){ msg.className='msg error'; msg.textContent='「供应商名称」最长 40 个字符'; return; }
+  const btn=$('#btnSupAdd'); btn.disabled=true; btn.textContent='保存中…';
+  try{
+    const resp=await fetch('/api/suppliers',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name:name,alias:alias,remark:remark})});
+    const r=await resp.json();
+    if(!r.ok){ msg.className='msg error'; msg.textContent=r.error||'保存失败'; return; }
+    state.suppliers=r.suppliers||[];
+    renderSupplierSelects(); renderSupplierTable();
+    msg.className='msg ok'; msg.textContent=r.msg||('已新增供应商「'+r.supplier.name+'」');
+    $('#supName').value=''; $('#supAlias').value=''; $('#supRemark').value='';
+    // 从下拉点进来的：直接把新供应商选上，省一次选择
+    if(state.supOpener){
+      const el=$(state.supOpener);
+      if(el && Array.from(el.options).some(o=>o.value===r.supplier.name)) el.value=r.supplier.name;
+    }
+    toast('供应商「'+r.supplier.name+'」已添加');
+    $('#supName').focus();
+  }catch(e){ msg.className='msg error'; msg.textContent='请求失败：'+e.message; }
+  finally{ btn.disabled=false; btn.textContent='保存供应商'; }
+}
+$('#btnSupAdd').addEventListener('click',submitSupplier);
+
+async function deleteSupplier(sid){
+  if(!state.isAdmin){ toast('需要管理员权限才能删除'); return; }
+  const row=state.suppliers.find(s=>String(s.id)===String(sid));
+  const name=row?row.name:('#'+sid);
+  if(!confirm('确认删除供应商「'+name+'」？该操作不可恢复。')) return;
+  try{
+    const resp=await fetch('/api/suppliers/'+sid+'/delete',{method:'POST'});
+    const r=await resp.json();
+    if(!r.ok){ toast(r.error||'删除失败'); if(resp.status===403){ state.isAdmin=false; applyAdminUI(); } return; }
+    state.suppliers=r.suppliers||[];
+    renderSupplierSelects(); renderSupplierTable();
+    const msg=$('#supMsg'); msg.className='msg ok'; msg.textContent=r.msg||'已删除';
+    toast('供应商「'+name+'」已删除');
+  }catch(e){ toast('删除请求失败：'+e.message); }
+}
+
 // ===== 管理员权限（清空历史库） =====
 function applyAdminUI(){
   const admin=state.isAdmin;
   $('#btnHistReset').style.display=admin?'':'none';
   $('#btnAdminLogin').style.display=admin?'none':'';
   $('#btnAdminLogout').style.display=admin?'':'none';
-  $('#adminState').textContent=admin?'当前身份：管理员（可清空历史库）':'当前身份：普通用户（无清空权限）';
+  $('#adminState').textContent=admin?'当前身份：管理员（可清空历史库 / 删除供应商）':'当前身份：普通用户（无清空权限）';
   $('#adminState').classList.toggle('is-admin',admin);
+  // 删除按钮的可见性取决于管理员身份，身份变化后重新渲染供应商表格
+  if(state.suppliers.length) renderSupplierTable();
 }
 async function loadAuth(){
   try{
@@ -299,4 +417,4 @@ $('#btnAdminLogout').addEventListener('click',async()=>{
   toast('已退出管理员');
 });
 
-loadStatus(); loadHistBatches(); loadAuth();
+loadStatus(); loadHistBatches(); loadAuth(); loadSuppliers();

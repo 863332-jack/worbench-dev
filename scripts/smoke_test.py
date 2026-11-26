@@ -87,6 +87,8 @@ def main():
     guard_live_data()
     os.makedirs(TMP, exist_ok=True)
     s = requests.Session()
+    # 直连库的路径同样参数化，临时实例下断言才不会落到实盘库上
+    DB_PATH = os.environ.get("SMOKE_DB_PATH") or os.path.join(ROOT, "data", "recon.db")
 
     print("== 1. 系统状态 ==")
     r = s.get(BASE + "/api/status", timeout=10).json()
@@ -182,8 +184,7 @@ def main():
 
     print("== 9. 数量/合计金额入库（B-1） ==")
     import sqlite3
-    conn = sqlite3.connect(os.environ.get("SMOKE_DB_PATH")
-                            or os.path.join(ROOT, "data", "recon.db"))
+    conn = sqlite3.connect(DB_PATH)
     row = conn.execute(
         "SELECT quantity, total_amount, bill_date, remark FROM hist_price WHERE model='J55' LIMIT 1"
     ).fetchone()
@@ -194,13 +195,13 @@ def main():
     print("== 10. 管理员清空 + 自动备份 ==")
     r = s.post(BASE + "/api/auth/login", json={"password": "13662566518"}, timeout=10)
     check("管理员登录", r.status_code == 200 and r.json().get("ok"))
-    db_size_before = os.path.getsize(os.path.join(ROOT, "data", "recon.db"))
+    db_size_before = os.path.getsize(DB_PATH)
     r = s.post(BASE + "/api/history/reset", timeout=30)
     check("清空成功", r.status_code == 200 and r.json().get("ok"))
     backup = r.json().get("backup", "")
     check("清空前自动备份", bool(backup) and os.path.exists(backup) and os.path.getsize(backup) > 0, backup)
-    db_size_after = os.path.getsize(os.path.join(ROOT, "data", "recon.db"))
-    conn2 = sqlite3.connect(os.path.join(ROOT, "data", "recon.db"))
+    db_size_after = os.path.getsize(DB_PATH)
+    conn2 = sqlite3.connect(DB_PATH)
     free = conn2.execute("PRAGMA freelist_count").fetchone()[0]
     conn2.close()
     # 断言 VACUUM 真实效果：空闲页归零且文件未增大（小数据量下清空前后页数相同属正常）
@@ -224,6 +225,56 @@ def main():
     check("正确密码可即时登录（管理员不自锁）",
           rr.status_code == 200 and rr.json().get("ok"), "code=%s" % rr.status_code)
     s.post(BASE + "/api/auth/logout", timeout=10)
+
+    print("== 12. 供应商管理（可扩展：新增后下拉/校验名单同步生效） ==")
+    r = s.get(BASE + "/api/suppliers", timeout=10).json()
+    names = [x["name"] for x in r.get("suppliers", [])]
+    check("供应商列表可用且含内置三家",
+          r.get("ok") is True and {"杰盛", "新新精密", "云锦"} <= set(names), str(names))
+
+    r = s.post(BASE + "/api/suppliers", json={"name": "   "}, timeout=10)
+    check("空名称被拒 400", r.status_code == 400 and r.json().get("ok") is False, r.text[:120])
+
+    r = s.post(BASE + "/api/suppliers", json={"name": "云锦 "}, timeout=10)
+    check("重复供应商被拒（空格/全半角视为同一家）", r.status_code == 400, r.text[:160])
+
+    r = s.post(BASE + "/api/suppliers",
+               json={"name": " 恒达 五金 ", "alias": "恒达,HD", "remark": "冒烟测试"}, timeout=10).json()
+    check("新增供应商 ok 且名称已归一化",
+          r.get("ok") is True and r.get("supplier", {}).get("name") == "恒达 五金", str(r)[:160])
+    check("新增后返回最新列表", "恒达 五金" in [x["name"] for x in r.get("suppliers", [])],
+          str(r.get("suppliers"))[:200])
+
+    # 新增的供应商必须立刻进入上传校验名单（不再写死三家）
+    f_new = make_xlsx(os.path.join(TMP, "new_sup.xlsx"),
+                      [["恒达 五金", "2026-11-01", "HD-1", "10*10", "铜", 10, 3, 30, ""]])
+    r = s.post(BASE + "/api/history/upload", files={"files": open(f_new, "rb")}, timeout=30).json()
+    check("新供应商账单可通过校验并入库", r.get("ok") is True and r.get("added") == 1, str(r)[:200])
+
+    f_bad = make_xlsx(os.path.join(TMP, "bad_sup.xlsx"),
+                      [["尚未建档的供应商", "2026-11-01", "X-1", "", "铜", 1, 3, 3, ""]])
+    r = s.post(BASE + "/api/history/upload", files={"files": open(f_bad, "rb")}, timeout=30).json()
+    check("未建档供应商仍被拒绝（名单未被放宽）",
+          r.get("ok") is False and any(e.get("field") == "供应商" for e in (r.get("errors") or [])),
+          str(r)[:200])
+
+    sid = [x["id"] for x in s.get(BASE + "/api/suppliers", timeout=10).json()["suppliers"]
+           if x["name"] == "恒达 五金"][0]
+    r = requests.post(BASE + "/api/suppliers/%d/delete" % sid, timeout=10)
+    check("未登录删除被拒 403", r.status_code == 403, r.text[:120])
+
+    s.post(BASE + "/api/auth/login", json={"password": "13662566518"}, timeout=10)
+    r = s.post(BASE + "/api/suppliers/%d/delete" % sid, timeout=10).json()
+    check("已被历史引用的供应商拒绝删除",
+          r.get("ok") is False and "已被使用" in (r.get("error") or ""), str(r)[:160])
+
+    s.post(BASE + "/api/suppliers", json={"name": "临时未使用供应商"}, timeout=10)
+    sid2 = [x["id"] for x in s.get(BASE + "/api/suppliers", timeout=10).json()["suppliers"]
+            if x["name"] == "临时未使用供应商"][0]
+    r = s.post(BASE + "/api/suppliers/%d/delete" % sid2, timeout=10).json()
+    check("无引用供应商可删除",
+          r.get("ok") is True and "临时未使用供应商" not in [x["name"] for x in r.get("suppliers", [])],
+          str(r)[:160])
 
     print()
     print("=" * 48)

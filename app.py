@@ -162,7 +162,13 @@ def housekeeping():
 @app.route("/")
 def index():
     hist_rows, idx_count = db.hist_count()
-    return render_template("index.html", hist_rows=hist_rows, idx_count=idx_count)
+    # 供应商从主数据读取（不再写死在模板里），新增后刷新页面即为最新
+    try:
+        suppliers = db.supplier_names()
+    except Exception:
+        suppliers = []
+    return render_template("index.html", hist_rows=hist_rows, idx_count=idx_count,
+                           suppliers=suppliers)
 
 
 # ---------- 入口1：历史数据上传（先审查，全通过才入库） ----------
@@ -285,6 +291,53 @@ def api_auth_login():
 def api_auth_logout():
     session.pop("admin", None)
     return jsonify(ok=True, msg="已退出管理员模式")
+
+
+# ---------- 供应商主数据（可扩展：新增后下拉与校验名单立即生效） ----------
+@app.route("/api/suppliers")
+def api_suppliers():
+    """供应商列表。with_usage=True 附带历史/核对引用数，供前端提示「已被使用不可删除」。"""
+    try:
+        return jsonify(ok=True, suppliers=db.list_suppliers(with_usage=True))
+    except Exception as e:
+        log.exception("供应商列表读取失败")
+        return jsonify(ok=False, error="供应商列表读取失败：%s" % e), 500
+
+
+@app.route("/api/suppliers", methods=["POST"])
+def api_supplier_add():
+    """新增供应商：写入 supplier 主数据后返回最新列表，前端据此刷新下拉。"""
+    data = request.get_json(silent=True) or request.form
+    name = str(data.get("name", "") or "").strip()
+    alias = str(data.get("alias", "") or "").strip()
+    remark = str(data.get("remark", "") or "").strip()
+    try:
+        sup = db.add_supplier(name, alias, remark)
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    except Exception as e:
+        log.exception("新增供应商失败")
+        return jsonify(ok=False, error="保存失败：%s" % e), 500
+    log.info("新增供应商：%s（别名：%s）", sup["name"], sup.get("alias") or "无")
+    return jsonify(ok=True, supplier=sup, suppliers=db.list_suppliers(with_usage=True),
+                   msg="供应商「%s」已保存，下拉选项与账单校验名单已同步更新" % sup["name"])
+
+
+@app.route("/api/suppliers/<int:sid>/delete", methods=["POST"])
+def api_supplier_delete(sid):
+    """删除供应商档案（仅管理员；已被历史/核对引用的拒绝删除）。"""
+    if not is_admin_session():
+        return jsonify(ok=False, error="需要管理员权限才能删除供应商档案"), 403
+    try:
+        name = db.delete_supplier(sid)
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 400
+    except Exception as e:
+        log.exception("删除供应商失败")
+        return jsonify(ok=False, error="删除失败：%s" % e), 500
+    log.info("删除供应商：%s", name)
+    return jsonify(ok=True, suppliers=db.list_suppliers(with_usage=True),
+                   msg="供应商「%s」已删除" % name)
 
 
 # ---------- 入口2：新账单核对 ----------

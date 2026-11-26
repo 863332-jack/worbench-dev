@@ -11,12 +11,14 @@
 5. load_price_index() 全量预载，matcher 不再逐行建连接（缺陷 P3-18）。
 """
 import os
+import re
 import hashlib
 import sqlite3
 import json
+import unicodedata
 from datetime import datetime
 
-from config import DB_PATH, BACKUP_DIR, BACKUP_KEEP
+from config import DB_PATH, BACKUP_DIR, BACKUP_KEEP, SEED_SUPPLIERS
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS import_batch (
@@ -108,6 +110,18 @@ CREATE TABLE IF NOT EXISTS recon_result (
 );
 CREATE INDEX IF NOT EXISTS idx_result_batch ON recon_result(recon_no);
 CREATE INDEX IF NOT EXISTS idx_result_status ON recon_result(status);
+
+-- 供应商主数据：供应商不再写死在代码里，由此表驱动（可在页面「供应商管理」中新增/停用）
+CREATE TABLE IF NOT EXISTS supplier (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,       -- 规范名称（与账单「供应商」列一致）
+    norm TEXT UNIQUE NOT NULL,       -- 归一化名称（查重用：去空格、全角转半角、大写）
+    alias TEXT,                      -- 别名（逗号分隔，用于按文件名/表头自动识别）
+    remark TEXT,
+    active INTEGER DEFAULT 1,        -- 1=可选；0=停用（历史数据仍保留）
+    created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_supplier_active ON supplier(active, name);
 """
 
 
@@ -143,6 +157,157 @@ def init_db():
                             "bill_date": "TEXT", "remark": "TEXT"})
     conn.commit()
     conn.close()
+    seed_suppliers()
+
+
+# ---------- 供应商主数据 ----------
+
+def supplier_norm(name):
+    """供应商名归一化（查重键）：全角转半角、去空白、大写。
+
+    用于识别「云锦 」「ＹＵＮＪＩＮ」「云锦」这类同义写法，避免重复建档。
+    """
+    s = unicodedata.normalize("NFKC", str(name or ""))
+    return re.sub(r"\s+", "", s).upper()
+
+
+def seed_suppliers():
+    """首次建库/升级时补齐供应商主数据。
+
+    - 代码里只保留「初始种子」（config.SEED_SUPPLIERS），之后一律以数据库为准；
+    - 同时把历史数据里已出现过、但主数据里没有的供应商自动补建，
+      保证升级后旧账单的供应商不会因为「不在列表里」而无法再用。
+    返回新增条数。
+    """
+    conn = connect()
+    existing = {r["norm"] for r in conn.execute("SELECT norm FROM supplier")}
+    added = 0
+
+    def _add(name, alias="", remark=""):
+        nonlocal added
+        n = str(name or "").strip()
+        if not n:
+            return
+        nm = supplier_norm(n)
+        if not nm or nm in existing:
+            return
+        conn.execute(
+            "INSERT OR IGNORE INTO supplier(name,norm,alias,remark,active,created_at) VALUES(?,?,?,?,1,?)",
+            (n, nm, alias or "", remark or "初始内置", now()),
+        )
+        existing.add(nm)
+        added += 1
+
+    for item in SEED_SUPPLIERS:
+        name, alias = (item if isinstance(item, (tuple, list)) else (item, ""))
+        _add(name, alias, "初始内置")
+    # 历史数据里出现过的供应商，自动补进主数据（升级兼容）
+    for r in conn.execute(
+        "SELECT DISTINCT supplier FROM hist_price WHERE supplier IS NOT NULL AND supplier<>''"
+    ).fetchall():
+        _add(r["supplier"], "", "由历史账单自动补建")
+    conn.commit()
+    conn.close()
+    return added
+
+
+def list_suppliers(active_only=False, with_usage=False):
+    """供应商列表（按建档顺序，新增加的追加在末尾）。with_usage=True 时附带历史/核对引用数。"""
+    sql = "SELECT * FROM supplier"
+    if active_only:
+        sql += " WHERE active=1"
+    sql += " ORDER BY id"
+    conn = connect()
+    rows = [dict(r) for r in conn.execute(sql)]
+    if with_usage:
+        hist = {r[0]: r[1] for r in conn.execute(
+            "SELECT supplier, COUNT(*) FROM hist_price GROUP BY supplier")}
+        recon = {r[0]: r[1] for r in conn.execute(
+            "SELECT supplier, COUNT(*) FROM recon_result GROUP BY supplier")}
+        for r in rows:
+            r["hist_rows"] = hist.get(r["name"], 0)
+            r["recon_rows"] = recon.get(r["name"], 0)
+            r["in_use"] = bool(r["hist_rows"] or r["recon_rows"])
+    conn.close()
+    return rows
+
+
+def supplier_names(active_only=True):
+    return [r["name"] for r in list_suppliers(active_only=active_only)]
+
+
+def supplier_exists(name):
+    return supplier_norm(name) in {r["norm"] for r in list_suppliers()}
+
+
+def add_supplier(name, alias="", remark=""):
+    """新增供应商。校验：必填 / 长度 / 非法字符 / 重名（忽略空格与全半角差异）。
+
+    返回新建记录 dict；校验失败抛 ValueError（带面向用户的中文原因）。
+    """
+    raw = str(name or "").strip()
+    if not raw:
+        raise ValueError("「供应商名称」不能为空")
+    display = re.sub(r"\s+", " ", unicodedata.normalize("NFKC", raw)).strip()
+    if len(display) > 40:
+        raise ValueError("「供应商名称」最长 40 个字符（当前 %d）" % len(display))
+    if re.search(r"[\\/:*?\"<>|\n\r\t]", display):
+        raise ValueError("「供应商名称」不能包含 \\ / : * ? \" < > | 等特殊字符")
+    nm = supplier_norm(display)
+    if len(nm) < 1:
+        raise ValueError("「供应商名称」无效，请填写有效名称")
+
+    conn = connect()
+    try:
+        dup = conn.execute("SELECT name FROM supplier WHERE norm=?", (nm,)).fetchone()
+        if dup:
+            raise ValueError("供应商「%s」已存在（忽略空格/全半角差异视为同一家），请勿重复添加"
+                             % dup["name"])
+        conn.execute(
+            "INSERT INTO supplier(name,norm,alias,remark,active,created_at) VALUES(?,?,?,?,1,?)",
+            (display, nm, str(alias or "").strip(), str(remark or "").strip(), now()),
+        )
+        conn.commit()
+        row = conn.execute("SELECT * FROM supplier WHERE norm=?", (nm,)).fetchone()
+        return dict(row)
+    finally:
+        conn.close()
+
+
+def delete_supplier(sid):
+    """删除供应商：仅允许删除没有任何历史/核对引用的供应商（有引用则要求先停用）。"""
+    conn = connect()
+    try:
+        row = conn.execute("SELECT * FROM supplier WHERE id=?", (sid,)).fetchone()
+        if not row:
+            raise ValueError("供应商不存在（可能已被删除）")
+        name = row["name"]
+        h = conn.execute("SELECT COUNT(*) FROM hist_price WHERE supplier=?", (name,)).fetchone()[0]
+        r = conn.execute("SELECT COUNT(*) FROM recon_result WHERE supplier=?", (name,)).fetchone()[0]
+        if h or r:
+            raise ValueError("供应商「%s」已被使用（历史 %d 条、核对 %d 条），不能删除；"
+                             "如只是不再合作，可考虑保留该档案" % (name, h, r))
+        conn.execute("DELETE FROM supplier WHERE id=?", (sid,))
+        conn.commit()
+        return name
+    finally:
+        conn.close()
+
+
+def supplier_alias_map():
+    """别名 → 规范名 的映射（用于按文件名/表头自动识别供应商）。
+
+    来源：supplier 表的 name 与 alias（alias 支持 , 、 ; 空格 分隔）。
+    """
+    out = {}
+    for r in list_suppliers():
+        name = r["name"]
+        out[name] = name
+        for a in re.split(r"[,，、;；/\s]+", r.get("alias") or ""):
+            a = a.strip()
+            if a:
+                out[a] = name
+    return out
 
 
 def now():

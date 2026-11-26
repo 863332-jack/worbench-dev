@@ -33,10 +33,10 @@
       </div>
       <div class="form-row">
         <label>供应商 <span class="muted">(可选，留空则按文件名/表头自动识别)</span></label>
-        <select id="histSupplier">
+        <select id="histSupplier" class="sup-select">
           <option value="">自动识别</option>
-          <option>杰盛</option><option>新新精密</option><option>云锦</option>
         </select>
+        <button class="btn ghost small" data-open-sup="1">＋ 新增供应商</button>
       </div>
       <div class="dropzone" id="histDrop">
         <div class="dz-icon">＋</div>
@@ -61,6 +61,16 @@
       <h2>已导入批次</h2>
       <div class="tablewrap" id="histBatches"></div>
     </div>
+    <div class="card">
+      <div class="card-head">
+        <div><h2>供应商管理</h2>
+          <p class="muted">供应商一律以数据库为准，不在代码中写死。新增后立即出现在两个上传入口的下拉中，并自动纳入账单校验名单。</p></div>
+        <div class="head-actions">
+          <button class="btn primary small" data-open-sup="1">＋ 新增供应商</button>
+        </div>
+      </div>
+      <div class="tablewrap" id="supTable"><div class="empty">加载中…</div></div>
+    </div>
   </section>
 
   <!-- 新账单核对 -->
@@ -72,10 +82,10 @@
       </div>
       <div class="form-row">
         <label>供应商 <span class="muted">(可选)</span></label>
-        <select id="rcSupplier">
+        <select id="rcSupplier" class="sup-select">
           <option value="">自动识别</option>
-          <option>杰盛</option><option>新新精密</option><option>云锦</option>
         </select>
+        <button class="btn ghost small" data-open-sup="1">＋ 新增供应商</button>
       </div>
       <div class="dropzone" id="rcDrop">
         <div class="dz-icon">＋</div>
@@ -120,6 +130,26 @@
   </section>
 
   <div class="toast" id="toast"></div>
+
+  <!-- 新增供应商弹窗 -->
+  <div class="modal" id="supplierModal">
+    <div class="modal-box wide">
+      <h3>新增供应商</h3>
+      <p class="muted">保存后写入数据库，两个上传入口的下拉与账单校验名单立即更新；后续可继续添加。</p>
+      <div class="form-row"><label>供应商名称 <span class="req">*</span></label>
+        <input type="text" id="supName" maxlength="40" placeholder="如：恒达五金（≤40 字，不能含 \ / : * ? &quot; &lt; &gt; |）"></div>
+      <div class="form-row"><label>别名 <span class="muted">(可选)</span></label>
+        <input type="text" id="supAlias" placeholder="用于文件名/表头自动识别，多个用逗号分隔，如：恒达,HD"></div>
+      <div class="form-row"><label>备注 <span class="muted">(可选)</span></label>
+        <input type="text" id="supRemark" placeholder="如：2026 年起合作"></div>
+      <div class="msg" id="supMsg"></div>
+      <div class="actions">
+        <button class="btn primary" id="btnSupAdd">保存供应商</button>
+        <button class="btn ghost" id="btnSupCancel">关闭</button>
+      </div>
+      <div class="tablewrap" id="supList" style="margin-top:16px"><div class="empty">加载中…</div></div>
+    </div>
+  </div>
 
   <!-- 管理员登录弹窗 -->
   <div class="modal" id="adminModal">

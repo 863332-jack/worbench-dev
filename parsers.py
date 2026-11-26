@@ -10,7 +10,21 @@ import os
 import re
 from datetime import date, datetime
 
-from config import SUPPLIER_KEYS, EXCLUDE_MARKERS
+from config import EXCLUDE_MARKERS
+
+
+def supplier_alias_map():
+    """别名/名称 → 规范名 的映射，来源为数据库 supplier 主数据。
+
+    供应商不再硬编码在代码里：新增供应商后，本函数自动包含，
+    账单按文件名/表头/「供应商」列自动识别时即可命中。
+    数据库尚未初始化时降级为空映射（供应商识别结果为「未知」，不致命）。
+    """
+    try:
+        import db
+        return db.supplier_alias_map()
+    except Exception:
+        return {}
 
 
 def xl_color_unused():
@@ -150,15 +164,20 @@ def extract_title_year(rows):
 
 
 def detect_supplier(path, rows):
-    """按文件名优先、表头内容次之识别供应商。"""
+    """按文件名优先、表头内容次之识别供应商。
+
+    候选来自 supplier 主数据（名称 + 别名），长词优先，避免「新新」抢在「新新精密」之前命中。
+    """
     base = os.path.basename(path)
-    for key, val in SUPPLIER_KEYS.items():
+    amap = supplier_alias_map()
+    keys = sorted(amap.keys(), key=len, reverse=True)
+    for key in keys:
         if key in base:
-            return val
+            return amap[key]
     head = " ".join(cell_str(c) for r in rows[:6] for c in r)
-    for key, val in SUPPLIER_KEYS.items():
+    for key in keys:
         if key in head:
-            return val
+            return amap[key]
     return "未知"
 
 
@@ -275,6 +294,8 @@ def parse_rows(path, supplier=None, kind="history"):
     supplier_override = supplier
     supplier = supplier or detect_supplier(path, rows)
     title_year = extract_title_year(rows)
+    # 只在解析开始时取一次主数据，避免逐行查库
+    amap = supplier_alias_map()
 
     def build(model, material, size, price_v, period, r_idx, norm=None, row_supplier=None):
         val, reason = parse_unit_price(price_v)
@@ -312,7 +333,7 @@ def parse_rows(path, supplier=None, kind="history"):
             if not supplier_override and c_supplier is not None and c_supplier < len(row):
                 sv = cell_str(row[c_supplier])
                 if sv:
-                    row_supplier = SUPPLIER_KEYS.get(sv, sv)
+                    row_supplier = amap.get(sv, sv)
             out.append(build(model,
                              row[c_mat] if c_mat is not None and c_mat < len(row) else "",
                              row[c_size] if c_size is not None and c_size < len(row) else "",
