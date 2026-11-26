@@ -894,9 +894,8 @@ def list_recon_batches():
 _MONTH_EXPR = "COALESCE(NULLIF(period,''), substr(bill_date,1,7))"
 
 
-def query_backup_rows(kinds=("history",), suppliers=None, month_from="", month_to="",
-                      include_excluded=False):
-    """按「账单类型 + 供应商 + 月份范围」筛选可备份的账单行。
+def query_backup_rows(kinds=("history",), suppliers=None, include_excluded=False):
+    """按「账单类型 + 供应商」筛选可备份的账单行（不做按月筛选）。
 
     kinds: history=历史价格库(hist_price) / recon=核对账单(recon_result)
     返回 {"history": [...], "recon": [...]}，元素为统一字段（供应商/日期/型号/尺寸/材质/
@@ -911,10 +910,6 @@ def query_backup_rows(kinds=("history",), suppliers=None, month_from="", month_t
             if suppliers:
                 where.append("supplier IN (%s)" % ",".join("?" * len(suppliers)))
                 args += suppliers
-            if month_from:
-                where.append(_MONTH_EXPR + " >= ?"); args.append(month_from)
-            if month_to:
-                where.append(_MONTH_EXPR + " <= ?"); args.append(month_to)
             if not include_excluded:
                 where.append("(exclude_reason IS NULL OR exclude_reason='')")
             sql = ("SELECT supplier, model, material, size, quantity, bill_date, period, "
@@ -927,10 +922,6 @@ def query_backup_rows(kinds=("history",), suppliers=None, month_from="", month_t
             if suppliers:
                 where.append("supplier IN (%s)" % ",".join("?" * len(suppliers)))
                 args += suppliers
-            if month_from:
-                where.append(_MONTH_EXPR + " >= ?"); args.append(month_from)
-            if month_to:
-                where.append(_MONTH_EXPR + " <= ?"); args.append(month_to)
             sql = ("SELECT supplier, model, material, size, quantity, bill_date, period, "
                    "bill_price AS unit_price, bill_amount AS total_amount, source_file, "
                    "source_row, status, recon_no, diff_types, price_gap, amount_gap "

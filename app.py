@@ -433,30 +433,41 @@ def api_supplier_history_rebuild():
 # ---------- 账单备份：按条件筛选 → 打包下载（可归档、可回灌） ----------
 
 def _backup_filters(args):
-    """解析备份筛选条件（GET 查询串）：账单类型 / 供应商 / 月份范围。"""
+    """解析备份筛选条件（GET 查询串）：账单类型 / 供应商 / 是否含无效价行。
+
+    导出粒度固定为「按供应商分类 + 全部期间」，不再支持按月筛选。
+    """
+    months = [k for k in ("month_from", "month_to") if (args.get(k) or "").strip()]
+    if months:
+        raise ValueError("账单导出已取消按月筛选，仅支持按供应商导出全部历史记录（请去掉 month_from / month_to 参数）")
     kinds = [k for k in (args.get("kinds") or "").split(",") if k in ("history", "recon")]
     if not kinds:
         kinds = ["history"]
     suppliers = [s.strip() for s in (args.get("suppliers") or "").split(",") if s.strip()]
-    month_from = (args.get("month_from") or "").strip()
-    month_to = (args.get("month_to") or "").strip()
-    bad = [m for m in (month_from, month_to) if m and not re.match(r"^\d{4}-\d{2}$", m)]
-    if bad:
-        raise ValueError("月份格式应为 YYYY-MM（如 2026-07），收到：%s" % "、".join(bad))
-    if month_from and month_to and month_from > month_to:
-        raise ValueError("起始月份（%s）不能晚于结束月份（%s）" % (month_from, month_to))
     return {
         "kinds": kinds,
         "suppliers": suppliers,
-        "month_from": month_from,
-        "month_to": month_to,
         "include_excluded": (args.get("include_excluded") or "") in ("1", "true", "on"),
     }
 
 
+# ---------- 账单导出/备份：仅管理员 ----------
+BACKUP_DENIED = "账单导出与备份仅管理员可用，请先以管理员身份登录后再操作"
+
+
+def _require_admin_for_backup():
+    """未登录管理员时返回 403 响应，否则返回 None。"""
+    if not is_admin_session():
+        return jsonify(ok=False, error=BACKUP_DENIED), 403
+    return None
+
+
 @app.route("/api/history/backup/preview")
 def api_backup_preview():
-    """导出前预览：将生成多少文件、多少行、金额合计，避免导出一个空包。"""
+    """导出前预览：将生成多少文件、多少行、金额合计，避免导出一个空包。（仅管理员）"""
+    denied = _require_admin_for_backup()
+    if denied:
+        return denied
     try:
         filters = _backup_filters(request.args)
         files, _groups = backup.plan(filters)
@@ -468,12 +479,16 @@ def api_backup_preview():
                            "amount": round(sum(f["amount"] for f in files), 2),
                            "history_rows": sum(f["rows"] for f in files if f["kind"] == "history"),
                            "recon_rows": sum(f["rows"] for f in files if f["kind"] == "recon")},
-                   zip_name=backup.zip_name(filters))
+                   scope=backup.SCOPE_TEXT,
+                   zip_name=backup.zip_name(filters, files))
 
 
 @app.route("/api/history/backup")
 def api_backup_download():
-    """按条件打包下载（ZIP：分表 + 备份清单.csv/json + 恢复说明.txt）。"""
+    """按条件打包下载（ZIP：分表 + 备份清单.csv/json + 恢复说明.txt）。（仅管理员）"""
+    denied = _require_admin_for_backup()
+    if denied:
+        return denied
     try:
         filters = _backup_filters(request.args)
         path, manifest = backup.build(filters)

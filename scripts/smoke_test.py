@@ -276,9 +276,9 @@ def main():
           r.get("ok") is True and "临时未使用供应商" not in [x["name"] for x in r.get("suppliers", [])],
           str(r)[:160])
 
-    print("== 13. 账单备份导出（筛选 → 打包 → 可回灌） ==")
-    import io
+    print("== 13. 账单备份导出（仅管理员 · 按供应商 · 全部期间） ==")
     import json as _json
+    import sqlite3
     import zipfile
     bk_rows = [["杰盛", "2027-01-02", "BK-1", "8*8", "铜", 10, 4, 40, ""],
                ["杰盛", "2027-01-03", "BK-2", "8*8", "铜", 5, 6, 30, ""],
@@ -287,30 +287,82 @@ def main():
     r = s.post(BASE + "/api/history/upload", files={"files": open(f_bk, "rb")}, timeout=30).json()
     check("备份用历史数据导入 ok", r.get("ok") is True and r.get("added") == 3, str(r)[:160])
 
-    r = s.get(BASE + "/api/history/backup/preview?kinds=history&month_from=2027-01&month_to=2027-01",
-              timeout=20).json()
-    check("备份预览：仅 1 月 → 2 条 / 1 个文件",
-          r.get("ok") and r["totals"]["rows"] == 2 and r["totals"]["files"] == 1,
-          str(r.get("totals")))
-    r = s.get(BASE + "/api/history/backup/preview?kinds=history&month_from=2027-02&month_to=2027-01", timeout=20)
-    check("备份：起止月份倒置被拒 400", r.status_code == 400, str(r.status_code))
-    r = s.get(BASE + "/api/history/backup/preview?kinds=history&month_from=2027-1", timeout=20)
-    check("备份：月份格式错误被拒 400", r.status_code == 400, str(r.status_code))
+    # --- 权限：非管理员一律 403，且提示明确 ---
+    s.post(BASE + "/api/auth/logout", timeout=10)
+    r = s.get(BASE + "/api/history/backup/preview?kinds=history", timeout=20)
+    check("非管理员：预览导出被拒 403 且提示明确",
+          r.status_code == 403 and "仅管理员" in (r.json().get("error") or ""),
+          "%s %s" % (r.status_code, r.text[:120]))
+    r = s.get(BASE + "/api/history/backup?kinds=history", timeout=20)
+    check("非管理员：打包下载被拒 403 且提示明确",
+          r.status_code == 403 and "仅管理员" in (r.json().get("error") or ""),
+          "%s %s" % (r.status_code, r.text[:120]))
 
-    resp = s.get(BASE + "/api/history/backup?kinds=history&month_from=2027-01&month_to=2027-02", timeout=60)
+    # --- 管理员登录后可用 ---
+    s.post(BASE + "/api/auth/login", json={"password": "13662566518"}, timeout=10)
+
+    # --- 按月份导出已取消 ---
+    r = s.get(BASE + "/api/history/backup/preview?kinds=history&month_from=2027-01", timeout=20)
+    check("按月导出参数被拒 400（已取消按月导出）",
+          r.status_code == 400 and "按月" in (r.json().get("error") or ""),
+          "%s %s" % (r.status_code, r.text[:120]))
+    r = s.get(BASE + "/api/history/backup/preview?kinds=history&month_from=2027-02&month_to=2027-01",
+              timeout=20)
+    check("按月导出仍被拒（不再做月份校验逻辑）", r.status_code == 400, str(r.status_code))
+
+    # --- 预览：按供应商分类、覆盖全部期间 ---
+    _ck = sqlite3.connect(os.environ.get("SMOKE_DB_PATH") or os.path.join(ROOT, "data", "recon.db"))
+    _valid = "COALESCE(exclude_reason,'')=''"
+    n_rows = _ck.execute("SELECT COUNT(*) FROM hist_price WHERE " + _valid).fetchone()[0]
+    n_sup = _ck.execute("SELECT COUNT(DISTINCT supplier) FROM hist_price WHERE " + _valid).fetchone()[0]
+    n_pairs = _ck.execute("SELECT COUNT(*) FROM (SELECT DISTINCT supplier, period FROM hist_price"
+                          " WHERE " + _valid + ")").fetchone()[0]
+    _ck.close()
+    r = s.get(BASE + "/api/history/backup/preview?kinds=history", timeout=20).json()
+    check("预览：行数=库内全部有效历史记录（不再受月份限制）",
+          r.get("ok") and r["totals"]["rows"] == n_rows, "%s vs %s" % (r.get("totals"), n_rows))
+    check("预览：文件数=供应商数（一家一个分表）",
+          r["totals"]["files"] == n_sup, "%s vs %s" % (r["totals"]["files"], n_sup))
+    _multi = n_pairs > n_sup      # 库里确实存在跨月供应商时，才能反证「未按月拆分」
+    check("未按月拆分：文件数=供应商数，而非「供应商×期间」数",
+          r["totals"]["files"] == n_sup and (not _multi or n_pairs > r["totals"]["files"]),
+          "files=%s suppliers=%s pairs=%s" % (r["totals"]["files"], n_sup, n_pairs))
+    check("预览：分表命名为「类型_供应商_全部记录」",
+          all(f["name"].endswith("_全部记录.xlsx") for f in r["files"]),
+          str([f["name"] for f in r["files"]])[:200])
+    check("预览：返回导出范围说明", "全部期间" in (r.get("scope") or ""), str(r.get("scope")))
+    _sups = sorted({f["supplier"] for f in r["files"]})
+    _want = _sups[0] if len(_sups) == 1 else "%d家供应商" % len(_sups)
+    check("ZIP 名称与实际导出的供应商一致（不写未命中的家数）",
+          _want in r["zip_name"], "%s / %s" % (_want, r["zip_name"]))
+
+    # --- 只导出指定供应商 ---
+    r = s.get(BASE + "/api/history/backup/preview?kinds=history&suppliers=%E6%9D%B0%E7%9B%9B",
+              timeout=20).json()
+    check("按供应商筛选生效（只出该供应商一个分表）",
+          r["totals"]["files"] == 1 and r["files"][0]["supplier"] == "杰盛", str(r["totals"]))
+
+    # --- 打包下载 ---
+    resp = s.get(BASE + "/api/history/backup?kinds=history", timeout=60)
     zpath = os.path.join(TMP, "bk.zip")
     open(zpath, "wb").write(resp.content)
-    check("备份打包 200 且为 ZIP", resp.status_code == 200 and resp.content[:2] == b"PK", str(resp.status_code))
+    check("备份打包 200 且为 ZIP", resp.status_code == 200 and resp.content[:2] == b"PK",
+          str(resp.status_code))
     zf = zipfile.ZipFile(zpath)
     names = zf.namelist()
     check("备份包含清单(CSV/JSON)与恢复说明",
           {"备份清单.csv", "备份清单.json", "恢复说明.txt"} <= set(names), str(names))
     man = _json.loads(zf.read("备份清单.json").decode("utf-8"))
-    check("备份清单行数与筛选一致", man["totals"]["rows"] == 3, str(man.get("totals")))
+    check("备份清单行数与库内有效记录数一致", man["totals"]["rows"] == n_rows,
+          "%s vs %s" % (man.get("totals"), n_rows))
+    check("备份清单声明范围=全部期间且不含月份条件",
+          "全部期间" in (man["filters"].get("scope") or "")
+          and "month_from" not in man["filters"], str(man["filters"]))
     check("备份清单含 SHA256 校验值", all(len(f["sha256"]) == 16 for f in man["files"]), "")
     xs = [n for n in names if n.endswith(".xlsx")]
-    check("分表命名可归档（分表以「历史账单_供应商_期间」命名）",
-          len(xs) >= 2 and all(n.startswith("历史账单_") and n.count("_") >= 2 for n in xs), str(xs))
+    check("分表命名可归档（类型_供应商_全部记录）",
+          len(xs) == n_sup and all(n.startswith("历史账单_") and n.endswith("_全部记录.xlsx") for n in xs),
+          str(xs))
     zp = os.path.join(TMP, "bk_unzip")
     os.makedirs(zp, exist_ok=True)
     zf.extractall(zp)

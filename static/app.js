@@ -565,11 +565,10 @@ function bkFilters(){
   const kinds=[];
   if($('#bkKindHistory').checked) kinds.push('history');
   if($('#bkKindRecon').checked) kinds.push('recon');
+  // 导出粒度固定为「按供应商分类 + 全部期间」，不再有月份条件
   return {
     kinds: kinds.join(','),
     suppliers: $$('#bkSuppliers input:checked').map(x=>x.value).join(','),
-    month_from: $('#bkFrom').value,
-    month_to: $('#bkTo').value,
     include_excluded: $('#bkInclExcluded').checked ? '1' : ''
   };
 }
@@ -577,9 +576,21 @@ function bkQuery(){
   const o=bkFilters();
   return Object.keys(o).filter(k=>o[k]).map(k=>k+'='+encodeURIComponent(o[k])).join('&');
 }
+// 前端兜底：即使按钮被强行去掉 disabled，也不发请求（后端仍会 403）
+function bkDenyIfNotAdmin(msgEl){
+  if(state.isAdmin) return false;
+  const msg=msgEl||$('#bkMsg');
+  if(msg){
+    msg.className='msg error';
+    msg.textContent='账单导出与备份仅管理员可用，请先点右上角「管理员登录」后再操作。';
+  }
+  return true;
+}
 
 $('#btnBkPreview').addEventListener('click',async()=>{
-  const f=bkFilters(), msg=$('#bkMsg'), box=$('#bkPreview');
+  const msg=$('#bkMsg'), box=$('#bkPreview');
+  if(bkDenyIfNotAdmin(msg)) return;
+  const f=bkFilters();
   if(!f.kinds){ toast('请至少选择一种账单类型'); return; }
   msg.className='msg'; msg.textContent='正在统计…'; box.innerHTML='';
   try{
@@ -587,16 +598,16 @@ $('#btnBkPreview').addEventListener('click',async()=>{
     if(!r.ok){ msg.className='msg error'; msg.textContent=r.error||'预览失败'; return; }
     if(!r.totals.rows){
       msg.className='msg error';
-      msg.textContent='当前筛选条件下没有可导出的账单数据，请放宽时间范围/供应商/账单类型';
+      msg.textContent='当前条件下没有可导出的账单数据，请检查供应商勾选与账单类型';
       return;
     }
     msg.className='msg ok';
-    msg.textContent=`将导出 ${r.totals.files} 个文件 / ${r.totals.rows} 条记录（历史 ${r.totals.history_rows} · 核对 ${r.totals.recon_rows}），金额合计 ${Number(r.totals.amount).toFixed(2)} 元；ZIP 名称：${r.zip_name}`;
-    let h='<div class="audit-box"><div class="audit-title">将打包的文件清单（分表为标准录入模板 9 列，可直接回灌）</div><div class="audit-scroll">'+
-          '<table class="audit-table"><thead><tr><th>文件名</th><th>类型</th><th>供应商</th><th>期间</th><th>行数</th><th>日期范围</th><th>金额合计</th><th>日期补齐</th></tr></thead><tbody>';
+    msg.textContent=`将导出 ${r.totals.files} 个文件 / ${r.totals.rows} 条记录（历史 ${r.totals.history_rows} · 核对 ${r.totals.recon_rows}），金额合计 ${Number(r.totals.amount).toFixed(2)} 元；范围：${r.scope}；ZIP 名称：${r.zip_name}`;
+    let h='<div class="audit-box"><div class="audit-title">将打包的文件清单（按供应商分类，一家一个分表，标准录入模板 9 列，可直接回灌）</div><div class="audit-scroll">'+
+          '<table class="audit-table"><thead><tr><th>文件名</th><th>类型</th><th>供应商</th><th>覆盖期间</th><th>期间数</th><th>行数</th><th>日期范围</th><th>金额合计</th><th>日期补齐</th></tr></thead><tbody>';
     r.files.forEach(x=>{
-      h+=`<tr><td>${esc(x.name)}</td><td>${esc(x.kind_label)}</td><td>${esc(x.supplier)}</td><td>${esc(x.month)}</td>
-        <td>${x.rows}</td><td>${esc(x.date_from||'—')} ~ ${esc(x.date_to||'—')}</td>
+      h+=`<tr><td>${esc(x.name)}</td><td>${esc(x.kind_label)}</td><td>${esc(x.supplier)}</td><td>${esc(x.period_range||'—')}</td>
+        <td>${x.period_count||0}</td><td>${x.rows}</td><td>${esc(x.date_from||'—')} ~ ${esc(x.date_to||'—')}</td>
         <td>${Number(x.amount).toFixed(2)}</td><td>${x.date_filled||0}</td></tr>`;
     });
     box.innerHTML=h+'</tbody></table></div></div>';
@@ -604,21 +615,29 @@ $('#btnBkPreview').addEventListener('click',async()=>{
 });
 
 $('#btnBkDownload').addEventListener('click',()=>{
-  const f=bkFilters(), msg=$('#bkMsg');
+  const msg=$('#bkMsg');
+  if(bkDenyIfNotAdmin(msg)) return;
+  const f=bkFilters();
   if(!f.kinds){ toast('请至少选择一种账单类型'); return; }
   msg.className='msg ok';
   msg.textContent='正在打包，浏览器会自动下载 ZIP…';
   window.location.href='/api/history/backup?'+bkQuery();
 });
 
-// ===== 管理员权限（清空历史库） =====
+// ===== 管理员权限（清空历史库 / 账单导出备份 / 删除供应商） =====
 function applyAdminUI(){
   const admin=state.isAdmin;
   $('#btnHistReset').style.display=admin?'':'none';
   const rb=$('#btnSupHistRebuild'); if(rb) rb.style.display=admin?'':'none';
+  // 账单导出/备份：入口保持可见，但非管理员时禁用并给出明确提示
+  const bok=$('#btnBkPreview'), bdl=$('#btnBkDownload');
+  if(bok) bok.disabled=!admin;
+  if(bdl) bdl.disabled=!admin;
+  const lock=$('#bkLockTag'); if(lock) lock.style.display=admin?'none':'';
+  const bmsg=$('#bkAdminMsg'); if(bmsg) bmsg.style.display=admin?'none':'';
   $('#btnAdminLogin').style.display=admin?'none':'';
   $('#btnAdminLogout').style.display=admin?'':'none';
-  $('#adminState').textContent=admin?'当前身份：管理员（可清空历史库 / 删除供应商）':'当前身份：普通用户（无清空权限）';
+  $('#adminState').textContent=admin?'当前身份：管理员（可清空历史库 / 导出备份 / 删除供应商）':'当前身份：普通用户（无清空与导出权限）';
   $('#adminState').classList.toggle('is-admin',admin);
   // 删除按钮的可见性取决于管理员身份，身份变化后重新渲染供应商表格
   if(state.suppliers.length) renderSupplierTable();

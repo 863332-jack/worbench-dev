@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""账单备份：按「账单类型 + 供应商 + 月份范围」筛选，打包成可归档、可回灌的 ZIP。
+"""账单备份：按「账单类型 + 供应商」分类，把该供应商的**全部历史记录**打包成可归档、
+可回灌的 ZIP。不支持按月筛选——文件粒度只能是供应商。
 
 设计要点：
 1. **可恢复优先**：每个分表都按标准录入模板的 9 列输出，解压后可原样从入口① 重新上传，
    用于恢复历史价基准（重复数据按 dedup 自动跳过，重复导入安全）；
-2. **命名可归档**：ZIP 与分表文件名都带类型/供应商/期间，按文件名即可判断内容；
+2. **命名可归档**：ZIP 与分表文件名都带类型/供应商，按文件名即可判断内容；
 3. **可核对**：ZIP 内附 `备份清单.csv`（人读）与 `备份清单.json`（机读，含行数与 SHA256），
    以及 `恢复说明.txt`。
 """
@@ -27,7 +28,7 @@ from config import OUTPUT_DIR
 # 与 deliverable 模板一致的 9 列（带 * 为必填），保证导出的分表能被入口① 直接回灌
 BACKUP_HEADERS = ["供应商 *", "日期 *", "型号 *", "尺寸", "材质", "数量", "单价 *", "合计金额", "备注"]
 KIND_LABELS = {"history": "历史账单", "recon": "核对账单"}
-NO_MONTH = "未标月份"
+SCOPE_TEXT = "全部期间（按供应商分类）"
 _ILLEGAL = re.compile(r'[\\/:*?"<>|\r\n\t]')
 
 
@@ -47,22 +48,33 @@ def _row_date(r):
 
 
 def plan(filters):
-    """只统计数据、不落盘：返回 {(kind, supplier, month): [rows]} 与汇总。"""
+    """只统计数据、不落盘：按「(类型, 供应商)」分组，返回文件清单与分组明细。
+
+    分组维度**只有供应商**——一家供应商一个分表，内容是该供应商的全部历史记录，
+    不按月拆分（导出粒度就是「按供应商分类」）。
+    """
     data = db.query_backup_rows(
         kinds=filters["kinds"], suppliers=filters["suppliers"],
-        month_from=filters["month_from"], month_to=filters["month_to"],
         include_excluded=filters["include_excluded"],
     )
     groups = {}
     for kind in filters["kinds"]:
         for r in data.get(kind, []):
-            month = (r.get("period") or "")[:7] or NO_MONTH
-            key = (kind, r.get("supplier") or "未填供应商", month)
+            key = (kind, r.get("supplier") or "未填供应商")
             groups.setdefault(key, []).append(r)
 
     files = []
-    for (kind, supplier, month), rows in sorted(groups.items(), key=lambda x: (x[0][0], x[0][1], x[0][2])):
-        dates = [d for d, _ in (_row_date(r) for r in rows) if d]
+    for (kind, supplier), rows in sorted(groups.items(), key=lambda x: (x[0][0], x[0][1])):
+        dates, periods, filled = [], set(), 0
+        for r in rows:
+            d, was_filled = _row_date(r)
+            if d:
+                dates.append(d)
+            if was_filled:
+                filled += 1
+            p = (r.get("period") or "")[:7]
+            if p:
+                periods.add(p)
         amount = 0.0
         for r in rows:
             try:
@@ -72,17 +84,21 @@ def plan(filters):
                     amount += float(r["quantity"]) * float(r["unit_price"])
             except (TypeError, ValueError):
                 pass
+        ps = sorted(periods)
         files.append({
             "kind": kind,
             "kind_label": KIND_LABELS.get(kind, kind),
             "supplier": supplier,
-            "month": month,
+            "period_count": len(ps),
+            "period_from": ps[0] if ps else "",
+            "period_to": ps[-1] if ps else "",
+            "period_range": ("%s ~ %s" % (ps[0], ps[-1])) if ps else "",
             "rows": len(rows),
             "date_from": min(dates) if dates else "",
             "date_to": max(dates) if dates else "",
             "amount": round(amount, 2),
-            "date_filled": sum(1 for r in rows if _row_date(r)[1]),
-            "name": "%s_%s_%s.xlsx" % (KIND_LABELS.get(kind, kind), _safe(supplier), _safe(month)),
+            "date_filled": filled,
+            "name": "%s_%s_全部记录.xlsx" % (KIND_LABELS.get(kind, kind), _safe(supplier)),
         })
     return files, groups
 
@@ -112,35 +128,36 @@ def _write_sheet(path, rows):
     wb.save(path)
 
 
-def _range_text(filters):
-    a, b = filters.get("month_from") or "", filters.get("month_to") or ""
-    if a and b:
-        return "%s至%s" % (a, b)
-    if a:
-        return "%s起" % a
-    if b:
-        return "截至%s" % b
-    return "全部月份"
-
-
-def zip_name(filters):
+def zip_name(filters, files=None):
+    """ZIP 名称。有实际文件清单时按**真实内容**命名（避免勾了 3 家、实际只导出 1 家这种不符）。"""
     kind_tag = "历史" if filters["kinds"] == ["history"] else (
         "核对" if filters["kinds"] == ["recon"] else "历史+核对")
-    suppliers = filters.get("suppliers") or []
-    sup_tag = "全部供应商" if not suppliers else (
-        _safe(suppliers[0]) if len(suppliers) == 1 else "%d家供应商" % len(suppliers))
+    if files:
+        sups = sorted({f["supplier"] for f in files})
+        selected_all = False
+    else:
+        sups = sorted(set(filters.get("suppliers") or []))
+        selected_all = not filters.get("suppliers")
+    if not sups:
+        sup_tag = "全部供应商" if selected_all else "无数据"
+    elif len(sups) == 1 and not selected_all:
+        sup_tag = _safe(sups[0])
+    elif selected_all:
+        sup_tag = "全部供应商"
+    else:
+        sup_tag = "%d家供应商" % len(sups)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return "账单备份_%s_%s_%s_%s.zip" % (kind_tag, sup_tag, _range_text(filters), ts)
+    return "账单备份_%s_%s_全部期间_%s.zip" % (kind_tag, sup_tag, ts)
 
 
 def build(filters):
     """生成备份 ZIP，返回 (zip 路径, 清单 dict)。"""
     files, groups = plan(filters)
     if not files:
-        raise ValueError("当前筛选条件下没有可导出的账单数据，请放宽时间范围/供应商/账单类型")
+        raise ValueError("当前条件下没有可导出的账单数据，请检查供应商勾选与账单类型")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    name = zip_name(filters)
+    name = zip_name(filters, files)
     path = os.path.join(OUTPUT_DIR, name)
     tmpdir = os.path.join(OUTPUT_DIR, "_backup_tmp_%s" % ts)
     os.makedirs(tmpdir, exist_ok=True)
@@ -148,7 +165,7 @@ def build(filters):
     manifest_files = []
     try:
         for f in files:
-            key = (f["kind"], f["supplier"], f["month"])
+            key = (f["kind"], f["supplier"])
             rows = groups[key]
             fp = os.path.join(tmpdir, f["name"])
             _write_sheet(fp, rows)
@@ -165,9 +182,7 @@ def build(filters):
                 "kinds": filters["kinds"],
                 "kinds_text": "、".join(KIND_LABELS.get(k, k) for k in filters["kinds"]),
                 "suppliers": filters.get("suppliers") or ["全部"],
-                "month_from": filters.get("month_from") or "",
-                "month_to": filters.get("month_to") or "",
-                "month_range": _range_text(filters),
+                "scope": SCOPE_TEXT,
                 "include_excluded": bool(filters.get("include_excluded")),
             },
             "totals": {
@@ -186,29 +201,33 @@ def build(filters):
         # 人读清单 CSV
         buf = StringIO()
         w = csv.writer(buf)
-        w.writerow(["文件名", "账单类型", "供应商", "账单期间", "行数", "最早日期", "最晚日期",
+        w.writerow(["文件名", "账单类型", "供应商", "覆盖期间", "期间数", "行数", "最早日期", "最晚日期",
                     "金额合计", "日期补齐行数", "SHA256前16位"])
         for f in manifest_files:
-            w.writerow([f["name"], f["kind_label"], f["supplier"], f["month"], f["rows"],
-                        f["date_from"], f["date_to"], f["amount"], f["date_filled"], f["sha256"]])
+            w.writerow([f["name"], f["kind_label"], f["supplier"], f["period_range"],
+                        f["period_count"], f["rows"], f["date_from"], f["date_to"],
+                        f["amount"], f["date_filled"], f["sha256"]])
         csv_text = buf.getvalue()
 
         restore_txt = (
             "账单备份 · 恢复说明\n"
             "==================================================\n"
             "生成时间：%s\n"
-            "筛选条件：账单类型=%s；供应商=%s；月份=%s\n"
+            "导出范围：账单类型=%s；供应商=%s；范围=%s\n"
             "文件数量：%d 个；记录总数：%d 条；金额合计：%.2f 元\n"
             "--------------------------------------------------\n"
+            "说明：本包按供应商分类，一家供应商一个分表，内容为该供应商的全部历史记录\n"
+            "      （不按月拆分、不支持按月导出）。\n"
+            "--------------------------------------------------\n"
             "目录结构：\n"
-            "  历史账单_<供应商>_<年月>.xlsx  按标准录入模板 9 列输出（供应商/日期/型号/尺寸/材质/数量/单价/合计金额/备注）\n"
-            "  核对账单_<供应商>_<年月>.xlsx  同上；核对状态等派生信息不写入分表，改由 备份清单.json 记录\n"
-            "  备份清单.csv / 备份清单.json   行数、期间、金额与 SHA256 校验值\n"
+            "  历史账单_<供应商>_全部记录.xlsx  按标准录入模板 9 列输出（供应商/日期/型号/尺寸/材质/数量/单价/合计金额/备注）\n"
+            "  核对账单_<供应商>_全部记录.xlsx  同上；核对状态等派生信息不写入分表，改由 备份清单.json 记录\n"
+            "  备份清单.csv / 备份清单.json     行数、覆盖期间、金额与 SHA256 校验值\n"
             "--------------------------------------------------\n"
             "如何恢复：\n"
             "  1) 解压本压缩包；\n"
             "  2) 打开系统「① 历史数据上传」，把需要恢复的 xlsx 拖入（可多选）；\n"
-            "  3) 上传后系统照常审查并追加，相同「供应商+型号+单价+月份」的记录自动跳过，\n"
+            "  3) 上传后系统照常审查并追加，相同「供应商+型号+单价+日期+数量+金额+备注」的记录自动跳过，\n"
             "     重复导入不会产生重复数据；\n"
             "  4) 上传成功后「历史数据上传」页会显示本次新增条数与累计条数，可与清单核对。\n"
             "--------------------------------------------------\n"
@@ -217,7 +236,7 @@ def build(filters):
             "  · 被排除的无效价（空价/待核价）默认不导出，如需一并备份请勾选「包含无效价行」；\n"
             "  · 核对账单回灌后成为历史价格基准，请确认业务口径后再导入。\n"
             % (manifest["generated_at"], manifest["filters"]["kinds_text"],
-               "、".join(manifest["filters"]["suppliers"]), manifest["filters"]["month_range"],
+               "、".join(manifest["filters"]["suppliers"]), manifest["filters"]["scope"],
                manifest["totals"]["files"], manifest["totals"]["rows"], manifest["totals"]["amount"])
         )
 
