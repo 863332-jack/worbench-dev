@@ -22,6 +22,7 @@
     <button class="tab active" data-tab="history">① 历史数据上传</button>
     <button class="tab" data-tab="reconcile">② 新账单核对</button>
     <button class="tab" data-tab="results">③ 结果查看与下载</button>
+    <button class="tab" data-tab="po">④ 采购订单</button>
   </nav>
 
   <!-- 历史数据上传 -->
@@ -121,6 +122,95 @@
 
   <div class="toast" id="toast"></div>
 
+  <!-- ④ 采购工程流程 -->
+  <section class="panel" id="panel-po">
+    <!-- 未登录：登录卡片 -->
+    <div class="card" id="poLoginCard">
+      <div class="card-head">
+        <div><h2>采购工程流程 · 登录</h2>
+          <p class="muted">采购方：上传图纸下单、登记到货；供应商：查看订单、下载图纸、确认接单。</p></div>
+      </div>
+      <div class="form-row"><label>账号</label>
+        <input id="poUser" placeholder="采购方 purchaser / 供应商 jiesheng、xinxin、yunjin"></div>
+      <div class="form-row"><label>密码</label>
+        <input id="poPwd" type="password" placeholder="初始密码 123456"></div>
+      <div class="actions"><button class="btn primary" id="btnPoLogin">登录</button></div>
+      <div class="msg" id="poLoginMsg"></div>
+    </div>
+
+    <!-- 已登录 -->
+    <div id="poApp" style="display:none">
+      <div class="card po-bar">
+        <div class="po-who-box">
+          <span class="badge" id="poRoleBadge">—</span>
+          <span id="poWho" class="po-who"></span>
+        </div>
+        <div class="po-stats" id="poStats"></div>
+        <button class="btn ghost small" id="btnPoLogout">退出登录</button>
+      </div>
+
+      <!-- 采购方：新建订单 -->
+      <div class="card" id="poCreateCard" style="display:none">
+        <div class="card-head">
+          <div><h2>新建采购订单</h2>
+            <p class="muted">上传图纸并提交下单，订单进入「待确认」状态，由供应商确认接单。</p></div>
+        </div>
+        <div class="po-form">
+          <div class="form-row"><label>供应商 <span class="req">*</span></label>
+            <select id="poSupplier"><option value="">请选择</option>
+              <option>杰盛</option><option>新新精密</option><option>云锦</option></select></div>
+          <div class="form-row"><label>物料名称 <span class="req">*</span></label>
+            <input id="poProduct" placeholder="如：铜接头"></div>
+          <div class="form-row"><label>型号</label>
+            <input id="poModel" placeholder="如：J55"></div>
+          <div class="form-row"><label>数量 <span class="req">*</span></label>
+            <input id="poQty" type="number" min="0.001" step="any" placeholder="如：300"></div>
+          <div class="form-row"><label>单位</label>
+            <input id="poUnit" placeholder="件 / 个 / 米"></div>
+          <div class="form-row"><label>单价（元）</label>
+            <input id="poPrice" type="number" min="0" step="any" placeholder="可选"></div>
+          <div class="form-row"><label>期望交期</label>
+            <input id="poDue" type="date"></div>
+          <div class="form-row"><label>图纸 <span class="req">*</span></label>
+            <input id="poDrawing" type="file" accept=".pdf,.dwg,.dxf,.png,.jpg,.jpeg,.xlsx,.xls"></div>
+          <div class="form-row full"><label>备注</label>
+            <input id="poRemark" placeholder="可选，如材质、表面处理要求"></div>
+        </div>
+        <div class="actions"><button class="btn primary" id="btnPoCreate">提交订单</button></div>
+        <div class="msg" id="poCreateMsg"></div>
+      </div>
+
+      <!-- 订单列表 -->
+      <div class="card">
+        <div class="card-head">
+          <div><h2 id="poListTitle">订单列表</h2>
+            <p class="muted" id="poListHint">点击订单行查看详情与进度轨迹</p></div>
+        </div>
+        <div class="filters" id="poFilters">
+          <button class="chip active" data-status="">全部</button>
+          <button class="chip" data-status="pending_confirm">待确认</button>
+          <button class="chip" data-status="confirmed">已接单</button>
+          <button class="chip" data-status="received">已收货</button>
+          <button class="chip" data-status="rejected">已拒接</button>
+        </div>
+        <div class="tablewrap" id="poOrders"></div>
+      </div>
+    </div>
+
+    <!-- 订单详情弹窗 -->
+    <div class="modal" id="poDetailModal">
+      <div class="modal-box wide">
+        <h3 id="poDetailTitle">订单详情</h3>
+        <div id="poDetailBody"></div>
+        <div class="actions">
+          <button class="btn primary" id="btnPoConfirm" style="display:none">确认接单</button>
+          <button class="btn ghost danger" id="btnPoReject" style="display:none">拒接订单</button>
+          <button class="btn ghost" id="btnPoClose">关闭</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
   <!-- 管理员登录弹窗 -->
   <div class="modal" id="adminModal">
     <div class="modal-box">
@@ -136,5 +226,6 @@
   </div>
 </div>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
+<script src="{{ url_for('static', filename='po.js') }}"></script>
 </body>
 </html>

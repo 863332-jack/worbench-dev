@@ -9,8 +9,10 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "outputs")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 BACKUP_DIR = os.path.join(DATA_DIR, "backups")
 DB_PATH = os.path.join(DATA_DIR, "recon.db")
+# 采购订单附件目录（图纸 / 收货凭证，每个订单一个子目录）
+PO_FILE_DIR = os.path.join(UPLOAD_DIR, "po")
 
-for d in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR, LOG_DIR, BACKUP_DIR):
+for d in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR, LOG_DIR, BACKUP_DIR, PO_FILE_DIR):
     os.makedirs(d, exist_ok=True)
 
 # ---------- 安全配置（集中管理，避免多处硬编码漂移） ----------

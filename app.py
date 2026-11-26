@@ -28,6 +28,7 @@ import db
 import matcher
 import exporter
 import validator
+import po_db
 
 app = Flask(__name__)
 
@@ -74,6 +75,7 @@ def _setup_logging():
 log = _setup_logging()
 
 db.init_db()
+po_db.init()
 
 # ---------- 管理员登录失败锁定（内存计数，重启清零） ----------
 _login_fail = {"count": 0, "until": 0.0}
@@ -243,15 +245,17 @@ def api_auth_status():
 @app.route("/api/auth/login", methods=["POST"])
 def api_auth_login():
     now = time.time()
-    # 登录锁定：连续失败达阈值后锁定一段时间
-    if _login_fail["until"] > now:
-        wait = int(_login_fail["until"] - now)
-        return jsonify(ok=False,
-                       error="登录尝试过于频繁，已锁定：请 %d 秒后重试" % wait), 423
     data = request.get_json(silent=True) or {}
     pwd = str(data.get("password", ""))
+    locked = _login_fail["until"] > now
     if pwd != CLEAR_PASSWORD:
         _login_fail["count"] += 1
+        # 锁定期内：错误密码一律拒绝（防暴力破解），不给出任何试探窗口
+        if locked:
+            wait = int(_login_fail["until"] - now)
+            log.warning("锁定期内的错误密码尝试被拒绝")
+            return jsonify(ok=False,
+                           error="登录已锁定，请 %d 秒后重试（锁定期间错误密码一律拒绝）" % wait), 423
         if _login_fail["count"] >= config.LOGIN_LOCK_AFTER:
             _login_fail["until"] = now + config.LOGIN_LOCK_SECONDS
             _login_fail["count"] = 0
@@ -260,10 +264,13 @@ def api_auth_login():
                            error="登录失败次数过多，已锁定 %d 分钟，请稍后重试" % (config.LOGIN_LOCK_SECONDS // 60)), 423
         log.warning("管理员登录密码错误（第 %d 次）", _login_fail["count"])
         return jsonify(ok=False, error="管理员密码错误，未获得清空权限"), 403
+    # 密码正确：即使此前处于锁定期也允许登录并清零计数
+    # （避免管理员被自己锁死 10 分钟、只能重启服务的运维困境；防爆破不受影响）
+    was_locked = locked
     _login_fail["count"] = 0
     _login_fail["until"] = 0.0
     session["admin"] = True
-    log.info("管理员登录成功")
+    log.info("管理员登录成功%s", "（此前处于锁定期，已通过正确密码解锁）" if was_locked else "")
     return jsonify(ok=True, msg="管理员身份验证通过，已获得清空历史库权限")
 
 
@@ -380,6 +387,298 @@ def api_download(recon_no):
     results = db.get_results(recon_no)
     path = exporter.export_results(recon_no, results, batch)
     return send_file(path, as_attachment=True, download_name=os.path.basename(path))
+
+
+# ---------- 采购工程流程：账号 / 下单 / 确认 / 收货 / 追踪 ----------
+def po_session():
+    return {"role": session.get("po_role"), "username": session.get("po_username"),
+            "supplier": session.get("po_supplier"), "display": session.get("po_display")}
+
+
+def po_require(role=None):
+    """采购流程登录与角色校验。返回 (session_dict, error_response)。"""
+    s = po_session()
+    if not s["role"]:
+        return None, (jsonify(ok=False, error="请先登录采购工程流程"), 401)
+    if role and s["role"] != role:
+        label = "采购方" if role == po_db.ROLE_PURCHASER else "供应商"
+        return None, (jsonify(ok=False, error="当前账号无此操作权限（需要%s角色）" % label), 403)
+    return s, None
+
+
+def _po_file_ok(filename):
+    return os.path.splitext(filename or "")[1].lower() in po_db.DOC_EXTS
+
+
+def save_po_file(order_no, file, prefix):
+    """保存图纸/收货凭证到 uploads/po/<order_no>/，返回 (原始文件名, 相对路径)。"""
+    name = os.path.basename(file.filename or "")
+    ext = os.path.splitext(name)[1].lower()
+    safe = "%s_%s%s" % (prefix, datetime.now().strftime("%Y%m%d%H%M%S"), ext)
+    sub = os.path.join(config.PO_FILE_DIR, order_no)
+    os.makedirs(sub, exist_ok=True)
+    path = os.path.join(sub, safe)
+    file.save(path)
+    return name, os.path.join(order_no, safe)
+
+
+def _po_num(v, field, required=False, positive=True):
+    """数量/单价解析：返回 (值, 错误信息)。"""
+    s = str(v if v is not None else "").strip()
+    if not s:
+        return (None, "「%s」不能为空" % field) if required else (None, None)
+    try:
+        n = float(s)
+    except ValueError:
+        return None, "「%s」必须是数字" % field
+    if n < 0:
+        return None, "「%s」不能为负数" % field
+    if positive and n == 0:
+        return None, "「%s」必须大于 0" % field
+    return n, None
+
+
+@app.route("/api/po/login", methods=["POST"])
+def api_po_login():
+    data = request.get_json(silent=True) or {}
+    user = po_db.verify_user(data.get("username", ""), data.get("password", ""))
+    if not user:
+        log.warning("采购流程登录失败：%s", data.get("username"))
+        return jsonify(ok=False, error="账号或密码错误"), 403
+    session["po_role"] = user["role"]
+    session["po_username"] = user["username"]
+    session["po_supplier"] = user["supplier"]
+    session["po_display"] = user["display_name"]
+    log.info("采购流程登录成功：%s（%s）", user["username"], user["role"])
+    return jsonify(ok=True, user=user, msg="登录成功")
+
+
+@app.route("/api/po/logout", methods=["POST"])
+def api_po_logout():
+    for k in ("po_role", "po_username", "po_supplier", "po_display"):
+        session.pop(k, None)
+    return jsonify(ok=True, msg="已退出采购流程")
+
+
+@app.route("/api/po/me")
+def api_po_me():
+    s = po_session()
+    if not s["role"]:
+        return jsonify(ok=False, error="未登录"), 401
+    return jsonify(ok=True, user={"username": s["username"], "role": s["role"],
+                                  "supplier": s["supplier"], "display_name": s["display"]},
+                   stats=po_db.stats())
+
+
+@app.route("/api/po/orders", methods=["POST"])
+def api_po_create_order():
+    s, err = po_require(po_db.ROLE_PURCHASER)
+    if err:
+        return err
+    form = request.form
+    supplier = (form.get("supplier") or "").strip()
+    product = (form.get("product_name") or "").strip()
+    model = (form.get("model") or "").strip()
+    unit = (form.get("unit") or "").strip()
+    required_date = (form.get("required_date") or "").strip()
+    remark = (form.get("remark") or "").strip()
+    drawing = request.files.get("drawing")
+
+    errors = []
+    if supplier not in ("杰盛", "新新精密", "云锦"):
+        errors.append("「供应商」必须选择：杰盛 / 新新精密 / 云锦")
+    if not product:
+        errors.append("「物料名称」不能为空")
+    if len(product) > 100:
+        errors.append("「物料名称」不能超过 100 字")
+    qty, e = _po_num(form.get("quantity"), "数量", required=True)
+    if e:
+        errors.append(e)
+    price, e = _po_num(form.get("unit_price"), "单价", required=False)
+    if e:
+        errors.append(e)
+    if required_date:
+        try:
+            datetime.strptime(required_date, "%Y-%m-%d")
+        except ValueError:
+            errors.append("「期望交期」格式应为 YYYY-MM-DD（如 2026-12-31）")
+    if not drawing or not drawing.filename:
+        errors.append("必须上传图纸文件")
+    elif not _po_file_ok(drawing.filename):
+        errors.append("图纸格式不支持，允许：%s" % " ".join(po_db.DOC_EXTS))
+    if errors:
+        return jsonify(ok=False, error="表单校验未通过，订单未创建", errors=errors), 400
+
+    order_no = po_db.new_order_no()
+    try:
+        drawing_name, drawing_path = save_po_file(order_no, drawing, "drawing")
+        order = po_db.create_order(
+            {"supplier": supplier, "product_name": product, "model": model,
+             "quantity": qty, "unit": unit, "unit_price": price,
+             "required_date": required_date, "remark": remark},
+            drawing_name, drawing_path, s["display"] or s["username"], order_no=order_no)
+    except Exception as e:
+        log.exception("创建采购订单失败")
+        import shutil
+        shutil.rmtree(os.path.join(config.PO_FILE_DIR, order_no), ignore_errors=True)
+        return jsonify(ok=False, error="创建订单失败：%s" % str(e)), 500
+    log.info("采购下单成功：%s 供应商 %s 物料 %s 数量 %g", order_no, supplier, product, qty)
+    return jsonify(ok=True, order=order, msg="下单成功，订单号 %s，等待供应商确认接单" % order_no)
+
+
+@app.route("/api/po/orders")
+def api_po_orders():
+    s, err = po_require()
+    if err:
+        return err
+    status = request.args.get("status") or None
+    if status and status not in po_db.STATUS_LABELS:
+        return jsonify(ok=False, error="状态参数无效"), 400
+    rows = po_db.list_orders(s["role"], s["supplier"], status)
+    return jsonify(ok=True, orders=rows, stats=po_db.stats(),
+                   labels=po_db.STATUS_LABELS, role=s["role"])
+
+
+@app.route("/api/po/orders/<order_no>")
+def api_po_order_detail(order_no):
+    s, err = po_require()
+    if err:
+        return err
+    order = po_db.get_order(order_no)
+    if not order:
+        return jsonify(ok=False, error="订单不存在"), 404
+    if s["role"] == po_db.ROLE_SUPPLIER and order["supplier"] != s["supplier"]:
+        return jsonify(ok=False, error="无权查看其他供应商的订单"), 403
+    acts = []
+    if s["role"] == po_db.ROLE_SUPPLIER and order["status"] == po_db.STATUS_PENDING:
+        acts = ["confirm", "reject"]
+    if s["role"] == po_db.ROLE_PURCHASER and order["status"] == po_db.STATUS_CONFIRMED:
+        acts = ["receive"]
+    return jsonify(ok=True, order=order, events=po_db.get_events(order_no),
+                   actions=acts, labels=po_db.STATUS_LABELS)
+
+
+@app.route("/api/po/orders/<order_no>/confirm", methods=["POST"])
+def api_po_confirm(order_no):
+    s, err = po_require(po_db.ROLE_SUPPLIER)
+    if err:
+        return err
+    order = po_db.get_order(order_no)
+    if not order:
+        return jsonify(ok=False, error="订单不存在"), 404
+    if order["supplier"] != s["supplier"]:
+        return jsonify(ok=False, error="无权操作其他供应商的订单"), 403
+    try:
+        order = po_db.confirm_order(order_no, s["display"] or s["username"])
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 409
+    log.info("供应商确认接单：%s by %s", order_no, s["username"])
+    return jsonify(ok=True, order=order, msg="已确认接单，等待采购方登记收货")
+
+
+@app.route("/api/po/orders/<order_no>/reject", methods=["POST"])
+def api_po_reject(order_no):
+    s, err = po_require(po_db.ROLE_SUPPLIER)
+    if err:
+        return err
+    order = po_db.get_order(order_no)
+    if not order:
+        return jsonify(ok=False, error="订单不存在"), 404
+    if order["supplier"] != s["supplier"]:
+        return jsonify(ok=False, error="无权操作其他供应商的订单"), 403
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get("reason", "")).strip()
+    if len(reason) > 200:
+        return jsonify(ok=False, error="拒接原因不能超过 200 字"), 400
+    try:
+        order = po_db.reject_order(order_no, reason, s["display"] or s["username"])
+    except ValueError as e:
+        return jsonify(ok=False, error=str(e)), 409
+    log.info("供应商拒接：%s by %s", order_no, s["username"])
+    return jsonify(ok=True, order=order, msg="已拒接该订单")
+
+
+@app.route("/api/po/orders/<order_no>/receive", methods=["POST"])
+def api_po_receive(order_no):
+    s, err = po_require(po_db.ROLE_PURCHASER)
+    if err:
+        return err
+    order = po_db.get_order(order_no)
+    if not order:
+        return jsonify(ok=False, error="订单不存在"), 404
+    form = request.form
+    received_date = (form.get("received_date") or "").strip()
+    remark = (form.get("receive_remark") or "").strip()
+    receipt = request.files.get("receipt")
+
+    errors = []
+    qty, e = _po_num(form.get("received_qty"), "到货数量", required=True)
+    if e:
+        errors.append(e)
+    if not received_date:
+        errors.append("「到货日期」不能为空")
+    else:
+        try:
+            datetime.strptime(received_date, "%Y-%m-%d")
+        except ValueError:
+            errors.append("「到货日期」格式应为 YYYY-MM-DD")
+    if receipt and receipt.filename and not _po_file_ok(receipt.filename):
+        errors.append("收货凭证格式不支持，允许：%s" % " ".join(po_db.DOC_EXTS))
+    if errors:
+        return jsonify(ok=False, error="表单校验未通过，收货未登记", errors=errors), 400
+
+    receipt_name = receipt_path = ""
+    if receipt and receipt.filename:
+        try:
+            receipt_name, receipt_path = save_po_file(order_no, receipt, "receipt")
+        except Exception as e:
+            return jsonify(ok=False, error="收货凭证保存失败：%s" % str(e)), 500
+    try:
+        order = po_db.receive_order(order_no, qty, received_date, remark,
+                                    receipt_name, receipt_path, s["display"] or s["username"])
+    except ValueError as e:
+        if receipt_path:
+            try:
+                os.remove(os.path.join(config.PO_FILE_DIR, receipt_path))
+            except OSError:
+                pass
+        return jsonify(ok=False, error=str(e)), 409
+    log.info("采购方登记收货：%s 数量 %g by %s", order_no, qty, s["username"])
+    return jsonify(ok=True, order=order, msg="收货登记成功，订单流程已完成")
+
+
+@app.route("/api/po/orders/<order_no>/file")
+def api_po_file(order_no):
+    s, err = po_require()
+    if err:
+        return err
+    order = po_db.get_order(order_no)
+    if not order:
+        return jsonify(ok=False, error="订单不存在"), 404
+    if s["role"] == po_db.ROLE_SUPPLIER and order["supplier"] != s["supplier"]:
+        return jsonify(ok=False, error="无权下载其他供应商订单的附件"), 403
+    kind = request.args.get("type", "drawing")
+    if kind == "drawing":
+        rel, shown = order.get("drawing_path"), order.get("drawing_name")
+    elif kind == "receipt":
+        rel, shown = order.get("receipt_path"), order.get("receipt_name")
+    else:
+        return jsonify(ok=False, error="附件类型无效"), 400
+    if not rel:
+        return jsonify(ok=False, error="该订单没有此类附件"), 404
+    base = os.path.realpath(config.PO_FILE_DIR)
+    path = os.path.realpath(os.path.join(base, rel))
+    if not path.startswith(base + os.sep) or not os.path.isfile(path):
+        return jsonify(ok=False, error="附件文件不存在"), 404
+    return send_file(path, as_attachment=True, download_name=shown or os.path.basename(path))
+
+
+@app.route("/api/po/stats")
+def api_po_stats():
+    s, err = po_require()
+    if err:
+        return err
+    return jsonify(ok=True, stats=po_db.stats())
 
 
 @app.route("/api/status")

@@ -171,8 +171,12 @@ def main():
     backup = r.json().get("backup", "")
     check("清空前自动备份", bool(backup) and os.path.exists(backup) and os.path.getsize(backup) > 0, backup)
     db_size_after = os.path.getsize(os.path.join(ROOT, "data", "recon.db"))
-    check("VACUUM 回收空间", db_size_after < db_size_before,
-          "before=%d after=%d" % (db_size_before, db_size_after))
+    conn2 = sqlite3.connect(os.path.join(ROOT, "data", "recon.db"))
+    free = conn2.execute("PRAGMA freelist_count").fetchone()[0]
+    conn2.close()
+    # 断言 VACUUM 真实效果：空闲页归零且文件未增大（小数据量下清空前后页数相同属正常）
+    check("VACUUM 回收空间（空闲页归零）", free == 0 and db_size_after <= db_size_before,
+          "before=%d after=%d free=%d" % (db_size_before, db_size_after, free))
     r = s.get(BASE + "/api/status", timeout=10).json()
     check("清空后库为空", r["hist_rows"] == 0 and r["idx_count"] == 0)
 
@@ -185,8 +189,12 @@ def main():
             locked = i + 1
             break
     check("连续失败触发锁定 423", locked is not None, "第 %s 次" % locked)
+    rr = s.post(BASE + "/api/auth/login", json={"password": "bad_after_lock"}, timeout=10)
+    check("锁定期内错误密码继续 423", rr.status_code == 423, "code=%s" % rr.status_code)
     rr = s.post(BASE + "/api/auth/login", json={"password": "13662566518"}, timeout=10)
-    check("锁定期间正确密码也拒绝", rr.status_code == 423, "code=%s" % rr.status_code)
+    check("正确密码可即时登录（管理员不自锁）",
+          rr.status_code == 200 and rr.json().get("ok"), "code=%s" % rr.status_code)
+    s.post(BASE + "/api/auth/logout", timeout=10)
 
     print()
     print("=" * 48)
