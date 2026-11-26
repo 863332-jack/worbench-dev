@@ -302,11 +302,35 @@ def main():
           "账单备份导出" not in page and 'id="bkCard"' not in page
           and 'id="btnBkDownload"' not in page, "len=%d" % len(page))
 
+    # --- 新增门禁：已导入批次 / 供应商历史有效数据（同样仅管理员） ---
+    r = s.get(BASE + "/api/history/batches", timeout=20)
+    check("非管理员：已导入批次接口被拒 403 且提示明确",
+          r.status_code == 403 and "仅管理员" in (r.json().get("error") or ""),
+          "%s %s" % (r.status_code, r.text[:120]))
+    r = s.get(BASE + "/api/suppliers/history", timeout=20)
+    check("非管理员：供应商历史台账接口被拒 403 且提示明确",
+          r.status_code == 403 and "仅管理员" in (r.json().get("error") or ""),
+          "%s %s" % (r.status_code, r.text[:120]))
+    check("非管理员：页面源码中没有「已导入批次」与「供应商历史有效数据」模块",
+          'id="foldBatches"' not in page and 'id="histBatches"' not in page
+          and 'id="foldSupHist"' not in page and 'id="shTable"' not in page,
+          "len=%d" % len(page))
+
     # --- 管理员登录后可用 ---
     s.post(BASE + "/api/auth/login", json={"password": "13662566518"}, timeout=10)
     page = s.get(BASE + "/", timeout=20).text
     check("管理员：页面才渲染出导出入口",
           "账单备份导出" in page and 'id="bkCard"' in page and 'id="btnBkDownload"' in page,
+          "len=%d" % len(page))
+    r = s.get(BASE + "/api/history/batches", timeout=20)
+    check("管理员：已导入批次接口恢复可用",
+          r.status_code == 200 and r.json().get("ok") is True, str(r.status_code))
+    r = s.get(BASE + "/api/suppliers/history", timeout=20)
+    check("管理员：供应商历史台账接口恢复可用",
+          r.status_code == 200 and r.json().get("ok") is True, str(r.status_code))
+    check("管理员：页面才渲染出「已导入批次」与「供应商历史有效数据」模块",
+          'id="foldBatches"' in page and 'id="histBatches"' in page
+          and 'id="foldSupHist"' in page and 'id="shTable"' in page,
           "len=%d" % len(page))
 
     # --- 按月份导出已取消 ---

@@ -57,11 +57,13 @@
       <div class="msg" id="histMsg"></div>
       <div class="report" id="histReport"></div>
     </div>
+    {% if is_admin %}
     <div class="card">
       <details class="fold" id="foldBatches">
         <summary class="fold-head">
           <span class="fold-ico" aria-hidden="true"></span>
           <h2>已导入批次</h2>
+          <span class="admin-tag">管理员可见</span>
           <span class="fold-count" id="foldBatchesCount"></span>
           <span class="fold-hint" data-closed="展开明细" data-open="收起明细"></span>
         </summary>
@@ -70,11 +72,14 @@
         </div>
       </details>
     </div>
+    {% endif %}
+    {% if is_admin %}
     <div class="card">
       <details class="fold" id="foldSupHist">
         <summary class="fold-head">
           <span class="fold-ico" aria-hidden="true"></span>
           <h2>供应商历史有效数据</h2>
+          <span class="admin-tag">管理员可见</span>
           <span class="fold-count" id="foldSupHistCount"></span>
           <span class="fold-hint" data-closed="展开台账" data-open="收起台账"></span>
           <button class="btn ghost small" id="btnSupHistRebuild" style="display:none">重建台账</button>
@@ -106,6 +111,7 @@
         </div>
       </details>
     </div>
+    {% endif %}
     {% if is_admin %}
     <div class="card" id="bkCard">
       <div class="card-head">

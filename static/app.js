@@ -150,10 +150,26 @@ $('#btnHistReset').addEventListener('click',async()=>{
   }catch(e){ $('#histMsg').className='msg error'; $('#histMsg').textContent='清空请求失败：'+e.message; }
 });
 
+// 「已导入批次」/「供应商历史有效数据」：管理员会话中途失效（403）时，
+// 就地隐藏这两块并回退 UI，避免数据入口继续暴露；重新登录后整页重载恢复。
+function ledgerForbidden(){
+  state.isAdmin=false;
+  applyAdminUI();
+  ['foldBatches','foldSupHist'].forEach(id=>{
+    const fold=document.getElementById(id);
+    if(fold){ const card=fold.closest('.card'); if(card) card.style.display='none'; }
+  });
+  toast('管理员会话已失效，「已导入批次」与「供应商历史有效数据」已隐藏，请重新登录');
+}
+
 async function loadHistBatches(){
+  // 「已导入批次」整块由服务端按会话渲染：非管理员页面里没有这块 DOM
+  if(!$('#histBatches')) return;
   const cnt=$('#foldBatchesCount');
   try{
-    const r=await fetch('/api/history/batches').then(x=>x.json());
+    const resp=await fetch('/api/history/batches');
+    if(resp.status===403){ ledgerForbidden(); return; }
+    const r=await resp.json();
     const el=$('#histBatches');
     if(cnt) cnt.textContent = r.batches.length ? `共 ${r.batches.length} 个批次` : '暂无批次';
     if(!r.batches.length){ el.innerHTML='<div class="empty">暂无历史导入批次</div>'; return; }
@@ -508,13 +524,17 @@ function shStatusTag(st){
 }
 
 async function loadSupplierHistory(){
+  // 「供应商历史有效数据」整块由服务端按会话渲染：非管理员页面里没有这块 DOM
+  if(!$('#shTable')) return;
   const p=new URLSearchParams();
   if($('#shSupplier') && $('#shSupplier').value) p.set('supplier',$('#shSupplier').value);
   if($('#shFrom').value) p.set('month_from',$('#shFrom').value);
   if($('#shTo').value) p.set('month_to',$('#shTo').value);
   if($('#shHideExpired').checked) p.set('include_expired','0');
   try{
-    const r=await fetch('/api/suppliers/history?'+p.toString()).then(x=>x.json());
+    const resp=await fetch('/api/suppliers/history?'+p.toString());
+    if(resp.status===403){ ledgerForbidden(); return; }
+    const r=await resp.json();
     if(!r.ok) throw new Error(r.error||'查询失败');
     renderSupplierHistory(r);
   }catch(e){ $('#shTable').innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
@@ -578,11 +598,16 @@ function renderShSupplierSelect(){
   if(cur) el.value=cur;
 }
 
-$('#btnShQuery').addEventListener('click',loadSupplierHistory);
+// 这几组控件都在服务端条件渲染的管理员模块里：非管理员页面无此 DOM，
+// 绑定前判空，避免脚本在初始化阶段抛错、连累其余模块的事件注册。
+const btnShQuery=$('#btnShQuery');
+if(btnShQuery) btnShQuery.addEventListener('click',loadSupplierHistory);
 ['#shSupplier','#shFrom','#shTo','#shHideExpired'].forEach(sel=>{
-  $(sel).addEventListener('change',loadSupplierHistory);
+  const el=$(sel);
+  if(el) el.addEventListener('change',loadSupplierHistory);
 });
-$('#btnSupHistRebuild').addEventListener('click',async(ev)=>{
+const btnSupHistRebuild=$('#btnSupHistRebuild');
+if(btnSupHistRebuild) btnSupHistRebuild.addEventListener('click',async(ev)=>{
   // 这个按钮在 <summary> 里：只做重建，不能顺带把整块折叠区展开/收起
   ev.preventDefault(); ev.stopPropagation();
   if(!state.isAdmin){ toast('需要管理员权限'); return; }
@@ -719,8 +744,9 @@ if(bkDlBtn) bkDlBtn.addEventListener('click',async()=>{
 });
 
 // ===== 管理员权限（清空历史库 / 账单导出备份 / 删除供应商） =====
-// 注意：账单备份导出整块由服务端按会话渲染（未登录管理员时 DOM 里根本没有），
-// 所以这里只处理始终存在的元素；登录/退出后整页重载，让服务端重新决定是否渲染。
+// 注意：「账单备份导出」「已导入批次」「供应商历史有效数据」三块均由服务端按会话渲染
+// （未登录管理员时 DOM 里根本没有），所以这里只处理始终存在的元素；
+// 登录/退出后整页重载，让服务端重新决定是否渲染。
 function applyAdminUI(){
   const admin=state.isAdmin;
   $('#btnHistReset').style.display=admin?'':'none';

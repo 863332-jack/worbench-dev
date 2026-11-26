@@ -278,6 +278,9 @@ def api_history_upload():
 
 @app.route("/api/history/batches")
 def api_history_batches():
+    denied = _require_admin_for_ledger()
+    if denied:
+        return denied
     return jsonify(ok=True, batches=db.list_history_batches())
 
 
@@ -394,6 +397,9 @@ def api_supplier_delete(sid):
 @app.route("/api/suppliers/history")
 def api_supplier_history():
     """供应商历史有效数据：按供应商 + 月份范围查询（含状态、来源、指标与最近变化）。"""
+    denied = _require_admin_for_ledger()
+    if denied:
+        return denied
     supplier = (request.args.get("supplier") or "").strip()
     month_from = (request.args.get("month_from") or "").strip()
     month_to = (request.args.get("month_to") or "").strip()
@@ -473,6 +479,19 @@ def _require_admin_for_backup():
         log.warning("拒绝未授权访问：%s %s（来自 %s）",
                     request.method, request.path, request.remote_addr)
         return jsonify(ok=False, error=BACKUP_DENIED), 403
+    return None
+
+
+# ---------- 已导入批次 / 供应商历史有效数据：仅管理员 ----------
+LEDGER_DENIED = "「已导入批次」与「供应商历史有效数据」仅管理员可见，请先以管理员身份登录后再操作"
+
+
+def _require_admin_for_ledger():
+    """未登录管理员时返回 403 响应，否则返回 None。"""
+    if not is_admin_session():
+        log.warning("拒绝未授权访问：%s %s（来自 %s）",
+                    request.method, request.path, request.remote_addr)
+        return jsonify(ok=False, error=LEDGER_DENIED), 403
     return None
 
 
