@@ -4,6 +4,11 @@ const PO_LABELS = { pending_confirm: '待确认', confirmed: '已接单', receiv
 const PO_CLS = { pending_confirm: 'po-st-pending', confirmed: 'po-st-confirmed',
                  received: 'po-st-received', rejected: 'po-st-rejected' };
 const PO_MAX_LINES = 50;
+// 图纸/凭证允许格式：唯一来源是后端 po_db.DOC_EXTS（由模板注入），前端不再各写一份
+const PO_DOC_EXTS = (window.PO_DOC_EXTS && window.PO_DOC_EXTS.length)
+  ? window.PO_DOC_EXTS
+  : ['.pdf', '.dwg', '.dxf', '.png', '.jpg', '.jpeg', '.xlsx', '.xls'];
+const PO_ACCEPT = window.PO_DOC_ACCEPT || PO_DOC_EXTS.join(',');
 let poState = { user: null, filter: '', current: null };
 let poLines = [];   // 下单行：[{model,param,size,material,quantity,unit,unit_price,required_date,remark,drawingFile,match:{state,msg}}]
 
@@ -43,6 +48,7 @@ function poShowApp() {
     ? '点击订单行查看详情与产品明细；「已接单」的订单可登记收货'
     : '点击订单行查看详情、下载各行图纸并确认接单';
   if (isPurchaser && poLines.length === 0) { poLines = [blankLine()]; renderEntry(); }
+  poLoadSuppliers();
 }
 
 function poRenderStats(st) {
@@ -58,6 +64,20 @@ async function poRefreshMe() {
     poState.user = r.user;
     poShowApp(); poRenderStats(r.stats); poLoadOrders();
   } catch (e) { poState.user = null; poShowLogin(); }
+}
+
+// 供应商下拉与后端匹配口径保持一致（内置供应商 ∪ 历史库实际出现的供应商）
+async function poLoadSuppliers() {
+  try {
+    const r = await fetch('/api/po/suppliers').then(x => x.json());
+    if (!r.ok || !r.suppliers || !r.suppliers.length) return;
+    const sel = $('#poSupplier');
+    if (!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">请选择</option>'
+      + r.suppliers.map(s => `<option>${esc(s)}</option>`).join('');
+    if (cur && r.suppliers.includes(cur)) sel.value = cur;
+  } catch (e) { /* 供应商列表取不到时沿用模板内置选项 */ }
 }
 
 // ---------- 订单列表 ----------
@@ -170,7 +190,7 @@ async function poOpenDetail(no) {
         <div class="form-row"><label>收货备注</label>
           <input id="poRcvRemark" placeholder="可选，如包装/外观情况"></div>
         <div class="form-row"><label>收货凭证</label>
-          <input id="poRcvFile" type="file" accept=".pdf,.png,.jpg,.jpeg,.xlsx,.xls"></div>
+          <input id="poRcvFile" type="file" accept="${PO_ACCEPT}"></div>
         <div class="actions"><button class="btn primary" id="btnPoReceive">提交收货</button></div>
         <div class="msg" id="poRcvMsg"></div></div>`;
     }
@@ -247,18 +267,20 @@ async function poReceive(no) {
 
 // ---------- 多行下单表单 ----------
 function matchShort(m) {
-  const map = { ok: '✓ 已匹配', warn: '⚠ 需确认', miss: '✕ 未找到', err: '✕ 查询失败', loading: '查询中…', empty: '—' };
+  const map = { ok: '✓ 已匹配', near: '≈ 近似匹配', warn: '⚠ 需确认', miss: '✕ 未找到',
+                err: '✕ 查询失败', loading: '查询中…', empty: '—' };
   return map[m && m.state] || '—';
 }
 function matchClass(m) {
-  return { ok: 'po-ok', warn: 'po-warn', miss: 'po-miss', err: 'po-miss', loading: 'po-loading' }[(m && m.state)] || '';
+  return { ok: 'po-ok', near: 'po-warn', warn: 'po-warn', miss: 'po-miss',
+           err: 'po-miss', loading: 'po-loading' }[(m && m.state)] || '';
 }
 
 function rowHtml(l, i) {
   const fileCell = l.drawingFile
     ? `<span class="po-file-name" title="${esc(l.drawingFile.name)}">📎 ${esc(l.drawingFile.name)}</span>
        <span class="po-file-x" data-clear="${i}" title="移除该行图纸">✕</span>`
-    : `<input type="file" class="po-file-input" data-file="${i}" accept=".pdf,.dwg,.dxf,.png,.jpg,.jpeg,.xlsx,.xls">`;
+    : `<input type="file" class="po-file-input" data-file="${i}" accept="${PO_ACCEPT}">`;
   const price = (l.unit_price === null || l.unit_price === undefined) ? '' : l.unit_price;
   return `<tr data-idx="${i}">
     <td class="c-line">${i + 1}</td>
@@ -306,17 +328,26 @@ function fillRowInputs(idx) {
 }
 
 function renderMatchSummary() {
-  const miss = [], warn = [];
+  const miss = [], warn = [], near = [];
   poLines.forEach((l, i) => {
     if (!(l.model || '').trim()) return;
-    if (l.match && l.match.state === 'miss') miss.push(i + 1);
-    if (l.match && l.match.state === 'warn') warn.push(i + 1);
+    const st = l.match && l.match.state;
+    if (st === 'miss') miss.push(i + 1);
+    else if (st === 'near') near.push(i + 1);
+    else if (st === 'warn' && l.match && l.match.risk) warn.push(i + 1);
   });
   const el = $('#poMatchSummary');
   if (!el) return;
   let h = '';
   if (miss.length) {
-    h += `<div class="po-note warn">✕ 第 ${miss.join('、')} 行型号未找到历史记录：可手工填写参数/尺寸/材料后继续下单，或核对型号是否正确。</div>`;
+    h += `<div class="po-note warn">✕ 第 ${miss.join('、')} 行型号未找到历史记录：可手工填写参数/尺寸/材料后继续下单，或核对型号是否与历史账单写法一致（全角/乘号/小数点差异已自动兼容）。</div>`;
+  }
+  if (near.length) {
+    const detail = near.map(i => {
+      const m = poLines[i - 1].match || {};
+      return `第 ${i} 行 → ${m.matched || '相近型号'}`;
+    }).join('；');
+    h += `<div class="po-note warn">≈ 第 ${near.join('、')} 行为近似匹配（未回填单价）：${esc(detail)}，请确认是否为同一零件。</div>`;
   }
   if (warn.length) {
     h += `<div class="po-note warn">⚠ 第 ${warn.join('、')} 行匹配到多条历史记录（多档价）：已回填最低价，请人工确认适用单价。</div>`;
@@ -345,9 +376,19 @@ async function lookupModel(idx) {
     if (!r.ok) {
       line.match = { state: 'err', msg: r.error || '查询失败' };
     } else if (!r.found) {
-      line.match = { state: 'miss', msg: r.message };
+      // 未命中：带上跨供应商诊断与相近型号建议，避免只给一句"未找到"
+      const extra = (r.suggestions && r.suggestions.length && !r.supplier_hint)
+        ? '（历史中相近写法：' + r.suggestions.slice(0, 3).join('、') + '）' : '';
+      line.match = { state: 'miss', msg: (r.message || '未找到') + extra, hint: r.supplier_hint || '' };
+    } else if (r.match_type === 'fuzzy') {
+      // 近似匹配：只回填尺寸/材料，不回填单价，强制人工核对
+      line.match = { state: 'near', msg: r.message, matched: r.matched_model || '' };
+      if (r.param) line.param = r.param;
+      if (r.size) line.size = r.size;
+      if (r.material) line.material = r.material;
     } else {
-      line.match = { state: r.risk ? 'warn' : 'ok', msg: r.message };
+      line.match = { state: r.risk ? 'warn' : 'ok', risk: !!r.risk, msg: r.message,
+                     matched: r.matched_model || '' };
       if (r.param) line.param = r.param;
       if (r.size) line.size = r.size;
       if (r.material) line.material = r.material;
@@ -478,6 +519,24 @@ $('#poEntryBody').addEventListener('input', e => {
   const idx = Number(el.dataset.idx);
   if (!poLines[idx] || !PO_FIELDS.includes(field)) return;
   poLines[idx][field] = el.value;
+  // 型号被改写后，旧的匹配结论不再成立：立刻置空，等失焦重新匹配，
+  // 避免「型号已改、徽章还显示已匹配」的错标。
+  if (field === 'model') {
+    const st = poLines[idx].match && poLines[idx].match.state;
+    if (st && st !== 'empty' && st !== 'loading') {
+      poLines[idx].match = { state: 'empty', msg: '' };
+      updateMatchCell(idx);
+      renderMatchSummary();
+    }
+  }
+});
+// 型号回车即匹配（不必先点别处）
+$('#poEntryBody').addEventListener('keydown', e => {
+  const el = e.target;
+  if (e.key === 'Enter' && el.dataset && el.dataset.field === 'model') {
+    e.preventDefault();
+    lookupModel(Number(el.dataset.idx));
+  }
 });
 // 型号失焦：自动匹配历史并回填
 $('#poEntryBody').addEventListener('focusout', e => {
@@ -494,10 +553,11 @@ $('#poEntryBody').addEventListener('change', e => {
   const idx = Number(el.dataset.file);
   const f = el.files && el.files[0];
   if (!f || !poLines[idx]) return;
-  const ext = f.name.toLowerCase().slice(f.name.lastIndexOf('.'));
-  const allow = ['.pdf', '.dwg', '.dxf', '.png', '.jpg', '.jpeg', '.xlsx', '.xls'];
-  if (!allow.includes(ext)) {
-    toast('图纸格式不支持：' + ext + '（允许 ' + allow.join(' ') + '）');
+  const dot = f.name.lastIndexOf('.');
+  const ext = dot >= 0 ? f.name.slice(dot).toLowerCase() : '';
+  if (!ext || !PO_DOC_EXTS.includes(ext)) {
+    toast('图纸格式不支持：' + (ext || '(无扩展名)') + '；支持 ' + PO_DOC_EXTS.length
+          + ' 种格式（pdf / dwg / dxf / step / igs / 图片 / Office / zip 等）');
     el.value = '';
     return;
   }

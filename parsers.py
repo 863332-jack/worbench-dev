@@ -384,11 +384,55 @@ def parse_rows(path, supplier=None, kind="history"):
     raise ValueError("无法识别表结构：未找到型号/单价等表头字段")
 
 
+# ---------- 型号归一化（匹配主键） ----------
+# 修复缺陷 P1-5：型号匹配只做「大写 + 去空格」，真人录入与历史账单之间
+# 常见的等价写法全部落到「未找到」，例如：
+#   M12*30   vs  M12x30 / M12×30        （乘号写法不一致）
+#   1002     vs  1002.0 / 1002.00       （Excel 数字被格式化成小数）
+#   J55      vs  Ｊ５５ / J55<零宽字符>  （全角、复制粘贴带入不可见字符）
+#   因此归一化必须覆盖：Unicode 全角→半角、不可见字符、直径符号、乘号、尾随 .0。
+_ZERO_WIDTH_RE = re.compile("[\u200b-\u200f\u202a-\u202e\ufeff\u00ad]")
+# 数字之间的乘号/连接符统一为 *：M12x30 / M12×30 / M12✕30 / M12·30 → M12*30
+_TIMES_RE = re.compile(r"(?<=\d)\s*[*✕✖✗·・×xX]\s*(?=\d)")
+# 直径符号统一为 Φ：φ29 / ϕ29 / ∅29 / ⌀29 → Φ29
+_PHI_RE = re.compile(r"[φϕ∅⌀ØøΦ]")
+# 首尾的连接符号（- — _ * · / 空格）不参与匹配
+_EDGE_RE = re.compile(r"^[\s\-—_*·/\\]+|[\s\-—_*·/\\]+$")
+# 纯数字型号的尾随 .0/.00（Excel 数值单元格常见）
+_TRAIL_ZERO_RE = re.compile(r"^(\d+)\.0+$")
+
+
 def normalize_model(s):
-    """型号标准化：去空格、统一大小写、去首尾符号。"""
-    s = cell_str(s).upper()
+    """型号归一化（历史入库与查询共用同一函数，保证键一致）。
+
+    步骤：去不可见字符 → Unicode NFKC（全角转半角）→ 大写 → 直径符号统一
+    → 去所有空白 → 数字间乘号统一为 * → 去首尾连接符 → 去纯数字尾随 .0。
+    """
+    s = cell_str(s)
+    if not s:
+        return ""
+    s = _ZERO_WIDTH_RE.sub("", s)
+    try:
+        import unicodedata
+        s = unicodedata.normalize("NFKC", s)   # ＋＊１２３Ｊ５５ → +*123J55
+    except Exception:
+        pass
+    s = _PHI_RE.sub("Φ", s.upper())
     s = re.sub(r"\s+", "", s)
-    return s.strip("-—_")
+    s = _TIMES_RE.sub("*", s)
+    s = _EDGE_RE.sub("", s)
+    m = _TRAIL_ZERO_RE.match(s)
+    if m:
+        s = m.group(1)
+    return s
+
+
+def model_key(s):
+    """型号「宽松键」：归一化后只保留字母/数字/汉字，用于忽略分隔符差异的近似匹配。
+
+    仅用于近似匹配（结果一律标「需确认」，不回填单价），不可作为精确主键。
+    """
+    return re.sub(r"[^0-9A-Z\u4e00-\u9fff]", "", normalize_model(s))
 
 
 def summarize(rows):

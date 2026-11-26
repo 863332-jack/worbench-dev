@@ -4,7 +4,9 @@
 覆盖：
 1. 未登录拦截 / 三角色登录 / 权限隔离
 2. 型号匹配三态：单档匹配回填、多档价提示、未找到提示（含跨供应商不可见）
+2b. 型号等价写法（大小写/全角/空格/连字符/零宽字符/乘号）、近似匹配、跨供应商诊断
 3. 多行下单（1-50 行）、行级图纸、行数上限 51 拒绝、必填行号反馈
+3b. 多格式图纸（step/docx/tif）上传下载、非法扩展名拒绝
 4. 确认接单 → 登记收货 → 事件轨迹（回归）
 5. 行级图纸下载（供应商端）+ 越权 403
 6. 拒接分支
@@ -50,6 +52,30 @@ def make_png(path):
         f.write(bytes.fromhex(
             "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
             "890000000a49444154789c6360000000020001e221bc330000000049454e44ae426082"))
+    return path
+
+
+def make_step(path):
+    """伪造 STEP 三维模型文件（扩展名校验用）。"""
+    with open(path, "wb") as f:
+        f.write(b"ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('SMOKE'),'2;1');\nENDSEC;\n"
+                b"DATA;\nENDSEC;\nEND-ISO-10303-21;\n")
+    return path
+
+
+def make_docx(path):
+    """伪造 Word 图纸说明文档（扩展名校验用，内容为最小 docx 结构）。"""
+    import zipfile
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml",
+                   '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+    return path
+
+
+def make_tif(path):
+    """伪造 TIFF 扫描图（扩展名校验用）。"""
+    with open(path, "wb") as f:
+        f.write(b"II*\x00\x08\x00\x00\x00\x00\x00")
     return path
 
 
@@ -123,6 +149,35 @@ def main():
     r = buyer.get(BASE + "/api/po/model-lookup?supplier=&model=J55", timeout=10)
     check("未选供应商时匹配被拒 400", r.status_code == 400)
 
+    print("== 3b. 型号等价写法与近似匹配（缺陷 P1-5 回归） ==")
+    # 历史库中的 J55 是「J55」写法，以下都是真人/Excel 最常带出来的等价写法
+    for typed, label in [("j55", "小写"), ("Ｊ５５", "全角"), ("J55 ", "尾部空格"),
+                         ("J55-", "尾部连字符"), ("J55\u200b", "零宽字符")]:
+        r = buyer.get(BASE + "/api/po/model-lookup",
+                      params={"supplier": "杰盛", "model": typed}, timeout=10).json()
+        check("等价写法命中：%s" % label,
+              r.get("found") is True and r.get("match_type") == "exact"
+              and r.get("unit_price") == 4, "%r -> %s" % (typed, str(r)[:180]))
+    # 历史 M12 存在多档价，用乘号/小数点变体也要精确命中
+    for typed, label in [("m12x40", "乘号 x"), ("M12×40", "乘号 ×")]:
+        r = buyer.get(BASE + "/api/po/model-lookup",
+                      params={"supplier": "新新精密", "model": typed}, timeout=10).json()
+        check("分隔符归一：%s" % label, r.get("found") is True, "%r -> %s" % (typed, str(r)[:180]))
+    r = buyer.get(BASE + "/api/po/model-lookup?supplier=杰盛&model=1002.0", timeout=10).json()
+    check("数字型号尾随 .0 归一（无此型号时不误判异常）", r.get("found") is False, str(r)[:150])
+    # 近似：J55X 与 J55 不是同一个型号 → fuzzy，且不回填单价
+    r = buyer.get(BASE + "/api/po/model-lookup?supplier=杰盛&model=J55X", timeout=10).json()
+    check("近似匹配标记 fuzzy 且不回填单价",
+          r.get("found") is True and r.get("match_type") == "fuzzy"
+          and r.get("unit_price") is None and r.get("matched_model") == "J55", str(r)[:220])
+    check("近似匹配提示语含「请核对型号」", "核对" in (r.get("message") or ""), r.get("message", ""))
+    # 跨供应商诊断：杰盛查 M12 → 明确指出在新新精密存在
+    r = buyer.get(BASE + "/api/po/model-lookup?supplier=杰盛&model=M12", timeout=10).json()
+    check("跨供应商诊断指出正确供应商",
+          r.get("found") is False and "新新精密" in (r.get("supplier_hint") or ""), str(r)[:200])
+    r = buyer.get(BASE + "/api/po/suppliers", timeout=10).json()
+    check("供应商列表接口可用", r.get("ok") and "杰盛" in (r.get("suppliers") or []), str(r)[:150])
+
     print("== 4. 多行下单（3 行，2 行带图纸） ==")
     items = [
         {"line_no": 1, "model": "J55", "param": "1 档价 ¥4", "size": "15*8", "material": "铜",
@@ -146,6 +201,53 @@ def main():
           and order.get("quantity") == 820 and order.get("total_amount") == 2950,
           "%s qty=%s amt=%s" % (order.get("product_name"), order.get("quantity"), order.get("total_amount")))
     check("初始状态=待确认", order.get("status") == "pending_confirm")
+
+    print("== 4b. 多格式图纸上传与下载（缺陷 P1-7 回归） ==")
+    make_step(os.path.join(TMP, "m.step"))
+    make_docx(os.path.join(TMP, "spec.docx"))
+    make_tif(os.path.join(TMP, "scan.tif"))
+    fmt_items = [
+        {"line_no": 1, "model": "J55", "quantity": 5, "unit": "件",
+         "required_date": "2026-12-31", "remark": "SMOKE-STEP"},
+        {"line_no": 2, "model": "J83", "quantity": 5, "unit": "件",
+         "required_date": "2026-12-31", "remark": "SMOKE-DOCX"},
+        {"line_no": 3, "model": "J83", "quantity": 5, "unit": "件",
+         "required_date": "2026-12-31", "remark": "SMOKE-TIF"},
+    ]
+    r = buyer.post(
+        BASE + "/api/po/orders",
+        data={"supplier": "杰盛", "remark": "SMOKE 多格式图纸",
+              "items_json": json.dumps(fmt_items, ensure_ascii=False)},
+        files={
+            "drawing_1": ("模型.step", open(os.path.join(TMP, "m.step"), "rb"), "application/octet-stream"),
+            "drawing_2": ("图纸说明.docx", open(os.path.join(TMP, "spec.docx"), "rb"),
+                          "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+            "drawing_3": ("扫描件.tif", open(os.path.join(TMP, "scan.tif"), "rb"), "image/tiff"),
+        },
+        timeout=30).json()
+    check("step / docx / tif 三种格式均被接收", r.get("ok") is True, str(r)[:250])
+    no3 = (r.get("order") or {}).get("order_no", "")
+    if no3:
+        detail = buyer.get(BASE + "/api/po/orders/" + no3, timeout=10).json()
+        names = [it.get("drawing_name") for it in detail.get("items") or []]
+        check("三行图纸文件名原样保留", names == ["模型.step", "图纸说明.docx", "扫描件.tif"], str(names))
+        for line, ext, head in [(1, ".step", b"ISO-10303"), (2, ".docx", b"PK"),
+                                (3, ".tif", b"II*\x00")]:
+            rr = sh_jiesheng.get(BASE + "/api/po/orders/" + no3 + "/file?type=drawing&line=%d" % line,
+                                 timeout=10)
+            cd = rr.headers.get("Content-Disposition", "")
+            ok = (rr.status_code == 200 and rr.content[:len(head)] == head
+                  and ext in cd.lower())
+            check("第 %d 行 %s 可下载且文件名带扩展名" % (line, ext), ok,
+                  "status=%s cd=%s" % (rr.status_code, cd))
+        rr = buyer.post(BASE + "/api/po/orders",
+                        data={"supplier": "杰盛", "items_json": json.dumps([fmt_items[0]], ensure_ascii=False)},
+                        files={"drawing_1": ("bad.exe", b"MZ", "application/octet-stream")}, timeout=20)
+        check("非法扩展名 .exe 仍被拒 400",
+              rr.status_code == 400 and any("图纸格式" in e for e in rr.json().get("errors", [])),
+              str(rr.json())[:200])
+    else:
+        no3 = ""
 
     print("== 5. 行数上限与必填校验 ==")
     r = buyer.post(BASE + "/api/po/orders",
@@ -217,7 +319,7 @@ def main():
 
     print("== 10. 清理测试数据 ==")
     conn = sqlite3.connect(os.path.join(ROOT, "data", "recon.db"))
-    order_nos = [no1, no2]
+    order_nos = [n for n in [no1, no2, no3] if n]
     for ono in order_nos:
         conn.execute("DELETE FROM po_order_item WHERE order_no=?", (ono,))
         conn.execute("DELETE FROM po_event WHERE order_no=?", (ono,))
@@ -237,6 +339,7 @@ def main():
             os.remove(os.path.join(ROOT, "data", "backups", f))
         except OSError:
             pass
+    shutil.rmtree(TMP, ignore_errors=True)   # 不留临时文件
 
     print()
     print("=" * 48)

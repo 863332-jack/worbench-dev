@@ -54,6 +54,7 @@ CREATE TABLE IF NOT EXISTS hist_price (
     created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_hist_model ON hist_price(supplier, model_norm);
+CREATE INDEX IF NOT EXISTS idx_hist_norm ON hist_price(model_norm);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_hist_dedup ON hist_price(dedup_hash);
 
 CREATE TABLE IF NOT EXISTS price_index (
@@ -397,6 +398,42 @@ def list_recon_batches():
     conn = connect()
     rows = conn.execute("SELECT * FROM recon_batch ORDER BY id DESC LIMIT 50").fetchall()
     conn.close(); return [dict(r) for r in rows]
+
+
+# ---------- 型号归一化迁移 ----------
+
+def refresh_model_norms():
+    """按当前归一化规则重算 hist_price.model_norm 并重建价格基准。
+
+    修复缺陷 P1-5：归一化规则升级后（全角/乘号/直径符号/尾随 .0/零宽字符），
+    旧数据里存的仍是旧口径 model_norm，新查询用新键去匹配会全部落空 —— 表现为
+    「型号明明在历史库里，采购端却显示未找到」。启动时执行一次即可，幂等且廉价。
+
+    返回 (改动条数, 价格基准条数)。
+    """
+    import parsers
+    conn = connect()
+    conn.isolation_level = None
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        rows = conn.execute("SELECT id, model, model_norm FROM hist_price").fetchall()
+        changed = 0
+        for r in rows:
+            new = parsers.normalize_model(r["model"])
+            if new and new != r["model_norm"]:
+                conn.execute("UPDATE hist_price SET model_norm=? WHERE id=?", (new, r["id"]))
+                changed += 1
+        idx_count = _rebuild_price_index_conn(conn)
+        conn.execute("COMMIT")
+        return changed, idx_count
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
+    finally:
+        conn.close()
 
 
 # ---------- 备份与清空 ----------

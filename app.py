@@ -77,6 +77,15 @@ log = _setup_logging()
 db.init_db()
 po_db.init()
 
+# 型号归一化规则升级后，历史库里的 model_norm 需要按新规则重算，
+# 否则采购端用新键匹配旧数据会全部落空（表现为「历史里有却显示未找到」）。
+try:
+    _changed, _idx = db.refresh_model_norms()
+    if _changed:
+        log.info("型号归一化迁移完成：重算 %d 条历史记录，价格基准 %d 个", _changed, _idx)
+except Exception:
+    log.exception("型号归一化迁移失败（不影响启动，但历史型号匹配可能不准）")
+
 # ---------- 管理员登录失败锁定（内存计数，重启清零） ----------
 _login_fail = {"count": 0, "until": 0.0}
 
@@ -155,7 +164,8 @@ def housekeeping():
 @app.route("/")
 def index():
     hist_rows, idx_count = db.hist_count()
-    return render_template("index.html", hist_rows=hist_rows, idx_count=idx_count)
+    return render_template("index.html", hist_rows=hist_rows, idx_count=idx_count,
+                           doc_exts=list(po_db.DOC_EXTS), doc_accept=po_db.DOC_ACCEPT)
 
 
 # ---------- 入口1：历史数据上传（先审查，全通过才入库） ----------
@@ -472,17 +482,32 @@ def api_po_me():
 
 @app.route("/api/po/model-lookup")
 def api_po_model_lookup():
-    """按「供应商 + 型号」匹配历史账单，返回回填数据（参数/尺寸/材料/单价）与匹配状态。"""
+    """按「供应商 + 型号」匹配历史账单，返回回填数据（参数/尺寸/材料/单价）与匹配状态。
+
+    供应商可选范围取自历史库实际出现的供应商（po_db.list_suppliers），
+    不再硬编码 —— 历史数据里换了供应商写法也不会被前端挡住。
+    """
     s, err = po_require(po_db.ROLE_PURCHASER)
     if err:
         return err
     supplier = (request.args.get("supplier") or "").strip()
     model = (request.args.get("model") or "").strip()
-    if supplier not in ("杰盛", "新新精密", "云锦"):
+    if not supplier:
         return jsonify(ok=False, error="请先选择供应商，再按型号匹配历史"), 400
     if not model:
         return jsonify(ok=False, error="型号不能为空"), 400
+    # 供应商不在历史库中时不直接报错：交给 lookup_model 返回「未找到 + 跨供应商诊断」，
+    # 前端照常显示可操作提示，不会因校验拦截而丢失诊断信息。
     return jsonify(ok=True, **po_db.lookup_model(supplier, model))
+
+
+@app.route("/api/po/suppliers")
+def api_po_suppliers():
+    """可选供应商列表（内置 + 历史库实际出现的），供下单页下拉与匹配校验共用。"""
+    s, err = po_require()
+    if err:
+        return err
+    return jsonify(ok=True, suppliers=po_db.list_suppliers())
 
 
 @app.route("/api/po/orders", methods=["POST"])
@@ -509,8 +534,9 @@ def api_po_create_order():
                        errors=["产品行数超限（上限 %d 行）" % po_db.MAX_LINES]), 400
 
     errors = []
-    if supplier not in ("杰盛", "新新精密", "云锦"):
-        errors.append("「供应商」必须选择：杰盛 / 新新精密 / 云锦")
+    allowed_suppliers = po_db.list_suppliers()
+    if supplier not in allowed_suppliers:
+        errors.append("「供应商」必须选择：%s" % " / ".join(allowed_suppliers))
 
     clean_items = []
     has_drawing = False
@@ -737,7 +763,11 @@ def api_po_file(order_no):
     path = os.path.realpath(os.path.join(base, rel))
     if not path.startswith(base + os.sep) or not os.path.isfile(path):
         return jsonify(ok=False, error="附件文件不存在"), 404
-    return send_file(path, as_attachment=True, download_name=shown or os.path.basename(path))
+    # 下载名保留真实扩展名：原始文件名若被改坏/无扩展名，Windows 端会因缺后缀无法直接打开
+    shown_name = (shown or "").strip() or os.path.basename(path)
+    if not os.path.splitext(shown_name)[1]:
+        shown_name += os.path.splitext(path)[1]
+    return send_file(path, as_attachment=True, download_name=shown_name)
 
 
 @app.route("/api/po/stats")

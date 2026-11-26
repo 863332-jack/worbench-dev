@@ -166,8 +166,7 @@
           <button class="btn ghost small" id="btnPoAddLine">＋ 添加产品行</button>
           <span class="muted" id="poLineCount">已添加 0 / 50 行</span>
           <span class="po-hint" id="poMatchHint">提示：先选择供应商，型号匹配依赖「供应商 + 型号」</span>
-        </div>
-        <div class="po-table-wrap">
+        </div>        <div class="po-table-wrap">
           <table class="po-entry-table">
             <thead><tr>
               <th class="c-line">行</th>
@@ -238,6 +237,7 @@
     </div>
   </div>
 </div>
+<script>window.PO_DOC_EXTS = {{ doc_exts|tojson }}; window.PO_DOC_ACCEPT = {{ doc_accept|tojson }};</script>
 <script src="{{ url_for('static', filename='app.js') }}"></script>
 <script src="{{ url_for('static', filename='po.js') }}"></script>
 </body>
