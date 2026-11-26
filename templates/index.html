@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>账单核对系统</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">账</span>
+      <div><h1>账单核对系统</h1><p>历史价格比对 · 最低价核对 · 人工复核</p></div>
+    </div>
+    <div class="statusbar" id="statusbar">
+      <span class="dot"></span><span id="statusText">正在加载状态…</span>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="history">① 历史数据上传</button>
+    <button class="tab" data-tab="reconcile">② 新账单核对</button>
+    <button class="tab" data-tab="results">③ 结果查看与下载</button>
+  </nav>
+
+  <!-- 历史数据上传 -->
+  <section class="panel active" id="panel-history">
+    <div class="card">
+      <div class="card-head">
+        <div><h2>导入历史账单 / 价格数据</h2>
+          <p class="muted">导入后自动校验字段格式、按「供应商+型号」建立价格基准。支持批量选择多个文件。</p></div>
+      </div>
+      <div class="form-row">
+        <label>供应商 <span class="muted">(可选，留空则按文件名/表头自动识别)</span></label>
+        <select id="histSupplier">
+          <option value="">自动识别</option>
+          <option>杰盛</option><option>新新精密</option><option>云锦</option>
+        </select>
+      </div>
+      <div class="dropzone" id="histDrop">
+        <div class="dz-icon">＋</div>
+        <div class="dz-title">拖拽文件到此处，或 <span class="link">点击选择</span></div>
+        <div class="dz-hint">支持 .xlsx / .xls（Excel），可多选</div>
+        <input type="file" id="histFiles" multiple accept=".xlsx,.xlsm,.xls" hidden>
+      </div>
+      <div class="filelist" id="histFileList"></div>
+      <div class="actions">
+        <button class="btn primary" id="btnHistUpload">上传并校验（追加）</button>
+        <button class="btn ghost danger" id="btnHistReset" style="display:none">清空历史库</button>
+      </div>
+      <div class="admin-strip">
+        <span id="adminState" class="admin-state">当前身份：普通用户（无清空权限）</span>
+        <button class="btn ghost small" id="btnAdminLogin">管理员登录</button>
+        <button class="btn ghost small" id="btnAdminLogout" style="display:none">退出管理员</button>
+      </div>
+      <div class="msg" id="histMsg"></div>
+      <div class="report" id="histReport"></div>
+    </div>
+    <div class="card">
+      <h2>已导入批次</h2>
+      <div class="tablewrap" id="histBatches"></div>
+    </div>
+  </section>
+
+  <!-- 新账单核对 -->
+  <section class="panel" id="panel-reconcile">
+    <div class="card">
+      <div class="card-head">
+        <div><h2>上传新账单并核对</h2>
+          <p class="muted">按「供应商+型号」匹配历史最低单价，判定是否已匹配最低价，并列出需人工复核的条目。</p></div>
+      </div>
+      <div class="form-row">
+        <label>供应商 <span class="muted">(可选)</span></label>
+        <select id="rcSupplier">
+          <option value="">自动识别</option>
+          <option>杰盛</option><option>新新精密</option><option>云锦</option>
+        </select>
+      </div>
+      <div class="dropzone" id="rcDrop">
+        <div class="dz-icon">＋</div>
+        <div class="dz-title">拖拽新账单到此处，或 <span class="link">点击选择</span></div>
+        <div class="dz-hint">支持 .xlsx / .xls（Excel），可多选</div>
+        <input type="file" id="rcFiles" multiple accept=".xlsx,.xlsm,.xls" hidden>
+      </div>
+      <div class="filelist" id="rcFileList"></div>
+      <div class="actions">
+        <button class="btn primary" id="btnReconcile">开始核对</button>
+      </div>
+      <div class="msg" id="rcMsg"></div>
+      <div class="report" id="rcReport"></div>
+    </div>
+    <div class="card">
+      <h2>核对批次</h2>
+      <div class="tablewrap" id="rcBatches"></div>
+    </div>
+  </section>
+
+  <!-- 结果查看 -->
+  <section class="panel" id="panel-results">
+    <div class="card">
+      <div class="card-head">
+        <div><h2>核对结果</h2><p class="muted">选择批次查看明细，按状态筛选；可下载完整 Excel。</p></div>
+        <div class="head-actions">
+          <select id="resultBatch"><option value="">请选择核对批次</option></select>
+          <button class="btn primary" id="btnDownload">下载结果 Excel</button>
+        </div>
+      </div>
+      <div class="filters" id="resultFilters">
+        <button class="chip active" data-status="">全部</button>
+        <button class="chip" data-status="matched_lowest">已匹配最低价</button>
+        <button class="chip" data-status="needs_review">需人工复核</button>
+        <button class="chip" data-status="above_lowest">高于历史最低价</button>
+        <button class="chip" data-status="no_history">无历史记录</button>
+        <button class="chip" data-status="parse_error">解析失败</button>
+      </div>
+      <div class="statcards" id="resultStats"></div>
+      <div class="tablewrap" id="resultTable"><div class="empty">请先选择一个核对批次</div></div>
+    </div>
+  </section>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- 管理员登录弹窗 -->
+  <div class="modal" id="adminModal">
+    <div class="modal-box">
+      <h3>管理员登录</h3>
+      <p class="muted">仅管理员可执行「清空历史库」操作。验证通过后，本页面会显示清空按钮。</p>
+      <div class="form-row"><label>管理员密码</label><input type="password" id="adminPassword" placeholder="请输入管理员密码"></div>
+      <div class="msg" id="adminMsg"></div>
+      <div class="actions">
+        <button class="btn primary" id="btnAdminConfirm">验证登录</button>
+        <button class="btn ghost" id="btnAdminCancel">取消</button>
+      </div>
+    </div>
+  </div>
+</div>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

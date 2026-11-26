@@ -1,0 +1,435 @@
+# -*- coding: utf-8 -*-
+"""账单核对系统 · Flask 主程序。
+
+两个入口：历史数据上传 / 新账单核对；结果查看与下载。数据全部本地存储。
+
+本次重构（上线前复盘 A/B 组）：
+- A-2 仅支持 .xlsx/.xlsm/.xls，移除 CSV/TSV 幻影支持声明；
+- A-3 历史导入/核对入库改为单事务（db.import_history / db.save_recon_file），
+  失败如实报错并整体回滚；
+- A-7 管理员密码集中到 config；secret_key 随机生成持久化；登录失败锁定；
+- B-2 全链路日志（logs/app.log，含异常堆栈）；
+- B-3 清空历史库前自动备份（data/backups/）；
+- B-5 移除未接线的 /api/histdb/* 孤岛路由（保留 hist_db 模块与表）；
+- B-6 启动时按保留策略清理超期上传/导出文件。
+"""
+import os
+import json
+import time
+import secrets
+import logging
+from logging.handlers import RotatingFileHandler
+from datetime import datetime, timedelta
+
+from flask import Flask, render_template, request, jsonify, send_file, session
+
+import config
+import db
+import matcher
+import exporter
+import validator
+
+app = Flask(__name__)
+
+# ---------- 会话密钥：随机生成一次并持久化（不随重启漂移，不可预测） ----------
+def _load_secret_key():
+    path = os.path.join(config.DATA_DIR, ".secret_key")
+    if os.path.exists(path):
+        with open(path) as f:
+            key = f.read().strip()
+        if key:
+            return key
+    key = secrets.token_hex(32)
+    with open(path, "w") as f:
+        f.write(key)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return key
+
+app.secret_key = _load_secret_key()
+app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024  # 100MB
+
+# 清空历史库的权限密码（集中于 config，服务端校验，仅管理员持有）
+CLEAR_PASSWORD = config.ADMIN_PASSWORD
+
+# 仅支持 Excel（移除 CSV/TSV：解析器不支持，避免承诺与实现矛盾）
+ALLOWED = (".xlsx", ".xlsm", ".xls")
+
+# ---------- 日志：轮转文件 + 控制台 ----------
+def _setup_logging():
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")
+    fh = RotatingFileHandler(os.path.join(config.LOG_DIR, "app.log"),
+                             maxBytes=1024 * 1024, backupCount=5, encoding="utf-8")
+    fh.setFormatter(fmt)
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(fh)
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    root.addHandler(sh)
+    return logging.getLogger("recon")
+
+log = _setup_logging()
+
+db.init_db()
+
+# ---------- 管理员登录失败锁定（内存计数，重启清零） ----------
+_login_fail = {"count": 0, "until": 0.0}
+
+
+def is_admin_session():
+    return session.get("admin") is True
+
+
+def dumps_safe(obj):
+    """JSON 序列化兜底：日期/未知对象转字符串，避免 datetime 等不可序列化导致入库失败。"""
+    def conv(o):
+        if hasattr(o, "isoformat"):
+            return o.isoformat()
+        return str(o)
+    return json.dumps(obj, ensure_ascii=False, default=conv)
+
+
+def allowed(filename):
+    return filename.lower().endswith(ALLOWED)
+
+
+def save_upload(file):
+    name = os.path.basename(file.filename)
+    # 每次上传使用独立子目录，避免同名文件互相覆盖、拒绝时便于清理
+    sub = os.path.join(config.UPLOAD_DIR, db.new_no("U"))
+    os.makedirs(sub, exist_ok=True)
+    path = os.path.join(sub, name)
+    file.save(path)
+    return path
+
+
+def cleanup_uploads(paths):
+    """审查失败时清理本次上传的临时文件。"""
+    for p in paths:
+        try:
+            os.remove(p)
+            parent = os.path.dirname(p)
+            if not os.listdir(parent):
+                os.rmdir(parent)
+        except OSError:
+            pass
+
+
+def housekeeping():
+    """启动时按保留策略清理超期文件（uploads/outputs），并整理备份份数。"""
+    cutoff = datetime.now() - timedelta(days=config.UPLOAD_RETENTION_DAYS)
+
+    def expired(path):
+        try:
+            return datetime.fromtimestamp(os.path.getmtime(path)) < cutoff
+        except OSError:
+            return False
+
+    n = 0
+    for d in os.listdir(config.UPLOAD_DIR):
+        sub = os.path.join(config.UPLOAD_DIR, d)
+        if os.path.isdir(sub) and expired(sub):
+            import shutil
+            try:
+                shutil.rmtree(sub)
+                n += 1
+            except OSError:
+                pass
+    for f in os.listdir(config.OUTPUT_DIR):
+        p = os.path.join(config.OUTPUT_DIR, f)
+        if os.path.isfile(p) and expired(p):
+            try:
+                os.remove(p)
+                n += 1
+            except OSError:
+                pass
+    if n:
+        log.info("housekeeping: 已清理 %d 个超期文件/目录（保留 %d 天）", n, config.UPLOAD_RETENTION_DAYS)
+
+
+@app.route("/")
+def index():
+    hist_rows, idx_count = db.hist_count()
+    return render_template("index.html", hist_rows=hist_rows, idx_count=idx_count)
+
+
+# ---------- 入口1：历史数据上传（先审查，全通过才入库） ----------
+@app.route("/api/history/upload", methods=["POST"])
+def api_history_upload():
+    files = request.files.getlist("files")
+    supplier_override = request.form.get("supplier", "").strip()
+    if not files or all(not f.filename for f in files):
+        return jsonify(ok=False, error="未选择文件"), 400
+
+    # === 阶段一：全部文件严格审查，任一错误即整批拒绝，不写入任何数据 ===
+    staged = []          # [(文件名, 路径, review)]
+    all_errors, all_warnings = [], []
+    saved_paths = []
+    for f in files:
+        if not f.filename or not allowed(f.filename):
+            all_errors.append({"file": f.filename or "(空)", "row": 0, "field": "文件格式",
+                               "value": f.filename or "",
+                               "reason": "不支持的文件格式，仅支持 .xlsx / .xlsm / .xls（Excel）",
+                               "cause": "如为 .csv 等其它格式，请先用 Excel 另存为 .xlsx 后重新上传。"})
+            continue
+        path = save_upload(f)
+        saved_paths.append(path)
+        review = validator.validate_file(path, supplier_override, "history")
+        staged.append((f.filename, path, review))
+        all_errors.extend(review["errors"])
+        all_warnings.extend(review["warnings"])
+
+    if all_errors:
+        cleanup_uploads(saved_paths)
+        return jsonify(ok=False,
+                       error="数据审查未通过：共 %d 处问题，本次全部文件均未录入系统。请按下列错误修改后重新上传。"
+                             % len(all_errors),
+                       errors=all_errors, warnings=all_warnings,
+                       rejected=[f.filename for f in files if f.filename]), 400
+
+    # === 阶段二：全部通过，单事务原子写入（任一环节失败整体回滚） ===
+    try:
+        reports, added, hist_rows, idx_count = db.import_history(
+            [(fname, review["rows"], review["meta"], len(review["warnings"]))
+             for fname, _path, review in staged]
+        )
+    except Exception as e:
+        log.exception("历史导入失败（已整体回滚）")
+        return jsonify(ok=False,
+                       error="入库失败，本次所有文件已整体回滚，数据库未发生任何变更：%s" % str(e),
+                       errors=[{"file": "", "row": 0, "field": "系统", "value": "", "reason": str(e),
+                                "cause": "详见服务端日志 logs/app.log；常见原因：文件损坏、并发写入冲突。"}]), 500
+
+    log.info("历史导入成功：新增 %d 条，累计 %d 条，型号基准 %d 个", added, hist_rows, idx_count)
+    return jsonify(ok=True, reports=reports, idx_count=idx_count, hist_rows=hist_rows,
+                   added=added,
+                   msg="追加成功：本次新增 %d 条，历史库累计 %d 条（原有数据完整保留，未被替换）" % (added, hist_rows),
+                   warnings=all_warnings)
+
+
+@app.route("/api/history/batches")
+def api_history_batches():
+    return jsonify(ok=True, batches=db.list_history_batches())
+
+
+@app.route("/api/history/reset", methods=["POST"])
+def api_history_reset():
+    # 后端强制校验清空权限：无权限直接拒绝，不执行任何清空
+    if not is_admin_session():
+        log.warning("越权清空请求被拒绝（非管理员会话）")
+        return jsonify(ok=False, error="无清空权限：仅管理员可执行清空历史库操作，请求已被拒绝"), 403
+    # 清空前自动备份（数据安全网：误清空可从 backups/ 恢复）
+    backup_path = ""
+    try:
+        backup_path = db.backup_db("pre_clear")
+        db.clear_all()
+    except Exception as e:
+        log.exception("清空历史库失败")
+        return jsonify(ok=False, error="清空失败：%s（历史数据未受影响）" % str(e)), 500
+    log.info("历史库已清空（清空前备份：%s）", backup_path)
+    return jsonify(ok=True, msg="已清空历史价格库与全部核对结果",
+                   backup=backup_path, backup_note="清空前已自动备份，如需恢复请联系管理员使用 %s" % backup_path)
+
+
+# ---------- 管理员权限（清空操作） ----------
+@app.route("/api/auth/status")
+def api_auth_status():
+    return jsonify(ok=True, is_admin=is_admin_session())
+
+
+@app.route("/api/auth/login", methods=["POST"])
+def api_auth_login():
+    now = time.time()
+    # 登录锁定：连续失败达阈值后锁定一段时间
+    if _login_fail["until"] > now:
+        wait = int(_login_fail["until"] - now)
+        return jsonify(ok=False,
+                       error="登录尝试过于频繁，已锁定：请 %d 秒后重试" % wait), 423
+    data = request.get_json(silent=True) or {}
+    pwd = str(data.get("password", ""))
+    if pwd != CLEAR_PASSWORD:
+        _login_fail["count"] += 1
+        if _login_fail["count"] >= config.LOGIN_LOCK_AFTER:
+            _login_fail["until"] = now + config.LOGIN_LOCK_SECONDS
+            _login_fail["count"] = 0
+            log.warning("管理员登录连续失败 %d 次，锁定 %d 秒", config.LOGIN_LOCK_AFTER, config.LOGIN_LOCK_SECONDS)
+            return jsonify(ok=False,
+                           error="登录失败次数过多，已锁定 %d 分钟，请稍后重试" % (config.LOGIN_LOCK_SECONDS // 60)), 423
+        log.warning("管理员登录密码错误（第 %d 次）", _login_fail["count"])
+        return jsonify(ok=False, error="管理员密码错误，未获得清空权限"), 403
+    _login_fail["count"] = 0
+    _login_fail["until"] = 0.0
+    session["admin"] = True
+    log.info("管理员登录成功")
+    return jsonify(ok=True, msg="管理员身份验证通过，已获得清空历史库权限")
+
+
+@app.route("/api/auth/logout", methods=["POST"])
+def api_auth_logout():
+    session.pop("admin", None)
+    return jsonify(ok=True, msg="已退出管理员模式")
+
+
+# ---------- 入口2：新账单核对 ----------
+@app.route("/api/reconcile", methods=["POST"])
+def api_reconcile():
+    files = request.files.getlist("files")
+    supplier_override = request.form.get("supplier", "").strip()
+    if not files or all(not f.filename for f in files):
+        return jsonify(ok=False, error="未选择文件"), 400
+
+    hist_rows, idx_count = db.hist_count()
+    if hist_rows == 0 or idx_count == 0:
+        return jsonify(ok=False, error="历史价格库为空，请先在「历史数据上传」导入历史账单"), 400
+
+    # === 阶段一：严格审查，任一错误即整批拒绝 ===
+    staged, all_errors, all_warnings, saved_paths = [], [], [], []
+    for f in files:
+        if not f.filename or not allowed(f.filename):
+            all_errors.append({"file": f.filename or "(空)", "row": 0, "field": "文件格式",
+                               "value": f.filename or "",
+                               "reason": "不支持的文件格式，仅支持 .xlsx / .xlsm / .xls（Excel）",
+                               "cause": "如为 .csv 等其它格式，请先用 Excel 另存为 .xlsx 后重新上传。"})
+            continue
+        path = save_upload(f)
+        saved_paths.append(path)
+        review = validator.validate_file(path, supplier_override, "pending")
+        staged.append((f.filename, review))
+        all_errors.extend(review["errors"])
+        all_warnings.extend(review["warnings"])
+    if all_errors:
+        cleanup_uploads(saved_paths)
+        return jsonify(ok=False,
+                       error="数据审查未通过：共 %d 处问题，本次核对未执行、未写入任何数据。"
+                             % len(all_errors),
+                       errors=all_errors, warnings=all_warnings), 400
+
+    # === 阶段二：逐文件核对并单事务入库（单文件失败即回滚该批次，不影响其它文件） ===
+    batches, all_counts = [], {"total": 0, "matched": 0, "review": 0, "above": 0, "nohistory": 0, "error": 0}
+    for fname, review in staged:
+        recon_no = db.new_no("R")
+        rows = review["rows"]
+        for r in rows:
+            r["exclude_reason"] = None
+        results, counts = matcher.run_match(rows)
+        for r in results:
+            r["recon_no"] = recon_no
+            # 按上传表头保存原始行值，供核对明细原样输出
+            r["raw_values_json"] = dumps_safe(r.get("raw_values", []))
+        try:
+            db.save_recon_file(recon_no, fname,
+                               headers=review["meta"].get("headers", []),
+                               mapping_diff=review["meta"].get("mapping_diff", []),
+                               results=results, counts=counts)
+        except Exception as e:
+            log.exception("核对入库失败（批次 %s 已回滚）", recon_no)
+            return jsonify(ok=False,
+                           error="核对入库失败：文件「%s」已回滚，之前完成的核对批次不受影响：%s"
+                                 % (fname, str(e))), 500
+        for k in all_counts:
+            all_counts[k] += counts[k]
+        batches.append({"file": fname, "ok": True, "recon_no": recon_no,
+                        "supplier": review["meta"]["supplier"],
+                        "total_rows": counts["total"], "matched": counts["matched"],
+                        "review": counts["review"], "above": counts["above"],
+                        "nohistory": counts["nohistory"], "error": counts["error"]})
+        log.info("核对完成：%s 批次 %s 总 %d / 匹配 %d / 复核 %d / 高于 %d / 无历史 %d / 解析失败 %d",
+                 fname, recon_no, counts["total"], counts["matched"], counts["review"],
+                 counts["above"], counts["nohistory"], counts["error"])
+
+    return jsonify(ok=True, batches=batches, counts=all_counts,
+                   total_results=sum(all_counts.values()), warnings=all_warnings)
+
+
+@app.route("/api/reconcile/batches")
+def api_reconcile_batches():
+    return jsonify(ok=True, batches=db.list_recon_batches())
+
+
+@app.route("/api/results/<recon_no>")
+def api_results(recon_no):
+    batch = db.get_recon_batch(recon_no)
+    if not batch:
+        return jsonify(ok=False, error="核对批次不存在"), 404
+    results = db.get_results(recon_no, request.args.get("status"))
+    # 解析上传表头与每行原始值，供前端按上传表头展示核对明细
+    try:
+        headers = json.loads(batch.get("headers_json") or "[]")
+    except Exception:
+        headers = []
+    for r in results:
+        try:
+            r["raw_values"] = json.loads(r.get("raw_values_json") or "[]")
+        except Exception:
+            r["raw_values"] = []
+        r.pop("raw_values_json", None)
+    batch_out = dict(batch)
+    batch_out.pop("headers_json", None)
+    batch_out.pop("mapping_diff_json", None)
+    return jsonify(ok=True, batch=batch_out, results=results, headers=headers)
+
+
+@app.route("/api/download/<recon_no>")
+def api_download(recon_no):
+    batch = db.get_recon_batch(recon_no)
+    if not batch:
+        return jsonify(ok=False, error="核对批次不存在"), 404
+    results = db.get_results(recon_no)
+    path = exporter.export_results(recon_no, results, batch)
+    return send_file(path, as_attachment=True, download_name=os.path.basename(path))
+
+
+@app.route("/api/status")
+def api_status():
+    hist_rows, idx_count = db.hist_count()
+    return jsonify(ok=True, hist_rows=hist_rows, idx_count=idx_count)
+
+
+@app.errorhandler(413)
+def too_large(e):
+    return jsonify(ok=False, error="上传文件超过 100MB 限制"), 413
+
+
+# ---------- 请求访问日志 ----------
+@app.before_request
+def _mark_start():
+    import time
+    request._start_ms = time.time() * 1000
+
+
+@app.after_request
+def _log_request(resp):
+    try:
+        cost = int(getattr(request, "_start_ms", 0) and (time.time() * 1000 - request._start_ms) or 0)
+    except Exception:
+        cost = 0
+    log.info("%s %s -> %d (%d ms)", request.method, request.path, resp.status_code, cost)
+    return resp
+
+
+if __name__ == "__main__":
+    import socket
+
+    def lan_ip():
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "127.0.0.1"
+
+    housekeeping()
+    ip = lan_ip()
+    print("=" * 56)
+    print("账单核对系统已启动（监听 0.0.0.0:5088，支持局域网访问）")
+    print("  本机访问:    http://127.0.0.1:5088")
+    print("  局域网访问:  http://%s:5088" % ip)
+    print("  日志文件:    logs/app.log")
+    print("  自动备份:    data/backups/（清空历史库前自动备份）")
+    print("=" * 56)
+    app.run(host="0.0.0.0", port=5088, debug=False, threaded=True)

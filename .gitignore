@@ -1,0 +1,7 @@
+data/
+uploads/
+outputs/
+logs/
+__pycache__/
+*.pyc
+scripts/.smoke_tmp/
