@@ -207,7 +207,7 @@ def index():
     except Exception:
         suppliers = []
     return render_template("index.html", hist_rows=hist_rows, idx_count=idx_count,
-                           suppliers=suppliers)
+                           suppliers=suppliers, is_admin=is_admin_session())
 
 
 # ---------- 入口1：历史数据上传（先审查，全通过才入库） ----------
@@ -458,6 +458,8 @@ BACKUP_DENIED = "账单导出与备份仅管理员可用，请先以管理员身
 def _require_admin_for_backup():
     """未登录管理员时返回 403 响应，否则返回 None。"""
     if not is_admin_session():
+        log.warning("拒绝未授权访问：%s %s（来自 %s）",
+                    request.method, request.path, request.remote_addr)
         return jsonify(ok=False, error=BACKUP_DENIED), 403
     return None
 
@@ -497,8 +499,11 @@ def api_backup_download():
     except Exception as e:
         log.exception("账单备份打包失败")
         return jsonify(ok=False, error="备份打包失败：%s" % e), 500
-    log.info("账单备份：%s（%d 个文件 / %d 条记录）", os.path.basename(path),
-             manifest["totals"]["files"], manifest["totals"]["rows"])
+    log.info("账单备份导出（管理员 via %s）：%s（%d 个文件 / %d 条记录 / 类型 %s / 供应商 %s）",
+             request.remote_addr, os.path.basename(path),
+             manifest["totals"]["files"], manifest["totals"]["rows"],
+             manifest["filters"]["kinds_text"],
+             "、".join(manifest["filters"]["suppliers"]))
     return send_file(path, as_attachment=True, download_name=os.path.basename(path))
 
 

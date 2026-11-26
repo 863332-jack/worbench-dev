@@ -7,7 +7,7 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 let state = { histFiles: [], rcFiles: [], currentRecon: '', currentStatus: '', currentDiff: '',
-              isAdmin: false, suppliers: [], supOpener: '' };
+              isAdmin: false, suppliers: [], supOpener: '', tab: 'history' };
 
 const BTN_HIST_TEXT = '上传并校验（追加）';
 const BTN_RC_TEXT = '开始核对';
@@ -57,13 +57,15 @@ function renderAuditErrors(errors, warnings){
 }
 
 // Tabs
-$$('.tab').forEach(btn=>btn.addEventListener('click',()=>{
-  $$('.tab').forEach(b=>b.classList.toggle('active',b===btn));
-  $$('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+btn.dataset.tab));
-  if(btn.dataset.tab==='results') loadResultBatches();
-  if(btn.dataset.tab==='history'){ loadHistBatches(); loadSupplierHistory(); }
-  if(btn.dataset.tab==='reconcile') loadRcBatches();
-}));
+function activateTab(name){
+  state.tab=name;
+  $$('.tab').forEach(b=>b.classList.toggle('active',b.dataset.tab===name));
+  $$('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+name));
+  if(name==='results') loadResultBatches();
+  if(name==='history'){ loadHistBatches(); loadSupplierHistory(); }
+  if(name==='reconcile') loadRcBatches();
+}
+$$('.tab').forEach(btn=>btn.addEventListener('click',()=>activateTab(btn.dataset.tab)));
 
 // Dropzone helper
 function bindDrop(dzId, inputId, key){
@@ -549,7 +551,25 @@ $('#btnSupHistRebuild').addEventListener('click',async(ev)=>{
   }catch(e){ toast('重建请求失败：'+e.message); }
 });
 
-// ===== 账单备份导出（筛选 → 预览 → 打包下载） =====
+// ===== 账单备份导出（仅管理员；入口由服务端按会话渲染，非管理员页面里根本没有这块 DOM） =====
+function bkDenyIfNotAdmin(msgEl){
+  if(state.isAdmin) return false;
+  const msg=msgEl||$('#bkMsg');
+  if(msg){
+    msg.className='msg error';
+    msg.textContent='账单导出与备份仅管理员可用，请先登录管理员。';
+  }
+  return true;
+}
+// 会话失效（403）：提示 + 就地隐藏入口，避免继续暴露
+function bkHandleForbidden(status, errText){
+  if(status!==403) return null;
+  state.isAdmin=false;
+  applyAdminUI();
+  const card=$('#bkCard'); if(card) card.style.display='none';
+  return errText||'无权限：账单导出与备份仅管理员可用';
+}
+
 function renderSupplierCheckboxes(){
   const box=$('#bkSuppliers'); if(!box) return;
   const hasInputs = box.querySelectorAll('input').length > 0;
@@ -576,25 +596,20 @@ function bkQuery(){
   const o=bkFilters();
   return Object.keys(o).filter(k=>o[k]).map(k=>k+'='+encodeURIComponent(o[k])).join('&');
 }
-// 前端兜底：即使按钮被强行去掉 disabled，也不发请求（后端仍会 403）
-function bkDenyIfNotAdmin(msgEl){
-  if(state.isAdmin) return false;
-  const msg=msgEl||$('#bkMsg');
-  if(msg){
-    msg.className='msg error';
-    msg.textContent='账单导出与备份仅管理员可用，请先点右上角「管理员登录」后再操作。';
-  }
-  return true;
-}
 
-$('#btnBkPreview').addEventListener('click',async()=>{
+const bkPrevBtn=$('#btnBkPreview'), bkDlBtn=$('#btnBkDownload');
+
+if(bkPrevBtn) bkPrevBtn.addEventListener('click',async()=>{
   const msg=$('#bkMsg'), box=$('#bkPreview');
   if(bkDenyIfNotAdmin(msg)) return;
   const f=bkFilters();
   if(!f.kinds){ toast('请至少选择一种账单类型'); return; }
   msg.className='msg'; msg.textContent='正在统计…'; box.innerHTML='';
   try{
-    const r=await fetch('/api/history/backup/preview?'+bkQuery()).then(x=>x.json());
+    const resp=await fetch('/api/history/backup/preview?'+bkQuery());
+    const r=await resp.json().catch(()=>({}));
+    const denied=bkHandleForbidden(resp.status, r.error);
+    if(denied!==null){ msg.className='msg error'; msg.textContent=denied; return; }
     if(!r.ok){ msg.className='msg error'; msg.textContent=r.error||'预览失败'; return; }
     if(!r.totals.rows){
       msg.className='msg error';
@@ -614,33 +629,71 @@ $('#btnBkPreview').addEventListener('click',async()=>{
   }catch(e){ msg.className='msg error'; msg.textContent='预览失败：'+e.message; }
 });
 
-$('#btnBkDownload').addEventListener('click',()=>{
+// 下载走 fetch 而不是 location.href：403/400/500 时能就地提示，
+// 不会把浏览器导航到一段 JSON 错误页；包大也不占内存太久（用完即释放）。
+if(bkDlBtn) bkDlBtn.addEventListener('click',async()=>{
   const msg=$('#bkMsg');
   if(bkDenyIfNotAdmin(msg)) return;
   const f=bkFilters();
   if(!f.kinds){ toast('请至少选择一种账单类型'); return; }
-  msg.className='msg ok';
-  msg.textContent='正在打包，浏览器会自动下载 ZIP…';
-  window.location.href='/api/history/backup?'+bkQuery();
+  const btns=[bkPrevBtn,bkDlBtn].filter(Boolean);
+  btns.forEach(b=>b.disabled=true);
+  msg.className='msg'; msg.textContent='正在打包，请稍候…';
+  try{
+    const resp=await fetch('/api/history/backup?'+bkQuery());
+    const ct=resp.headers.get('Content-Type')||'';
+    if(!resp.ok || ct.indexOf('json')>=0){
+      const j=await resp.json().catch(()=>({}));
+      const denied=bkHandleForbidden(resp.status, j.error);
+      throw new Error(denied!==null? denied
+        : (j.error || ('导出失败（HTTP '+resp.status+'）')));
+    }
+    const blob=await resp.blob();
+    if(!blob.size) throw new Error('服务端返回了空文件');
+    const cd=resp.headers.get('Content-Disposition')||'';
+    let name='';
+    // 优先用 RFC 5987 的 filename*=UTF-8''…（中文名），否则退回 filename=
+    const utf=/filename\*=UTF-8''([^;]+)/i.exec(cd);
+    if(utf){ try{ name=decodeURIComponent(utf[1].trim()); }catch(_){ name=utf[1].trim(); } }
+    if(!name){
+      const plain=/filename="?([^";]+)"?/i.exec(cd);
+      if(plain) name=plain[1].trim();
+    }
+    if(!name) name='账单备份.zip';
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');
+    a.href=url; a.download=name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),5000);
+    msg.className='msg ok';
+    msg.textContent=`已开始下载：${name}（${(blob.size/1048576).toFixed(2)} MB）`;
+  }catch(e){
+    msg.className='msg error';
+    msg.textContent=e.message||'导出失败';
+  }finally{
+    btns.forEach(b=>b.disabled=false);
+  }
 });
 
 // ===== 管理员权限（清空历史库 / 账单导出备份 / 删除供应商） =====
+// 注意：账单备份导出整块由服务端按会话渲染（未登录管理员时 DOM 里根本没有），
+// 所以这里只处理始终存在的元素；登录/退出后整页重载，让服务端重新决定是否渲染。
 function applyAdminUI(){
   const admin=state.isAdmin;
   $('#btnHistReset').style.display=admin?'':'none';
   const rb=$('#btnSupHistRebuild'); if(rb) rb.style.display=admin?'':'none';
-  // 账单导出/备份：入口保持可见，但非管理员时禁用并给出明确提示
-  const bok=$('#btnBkPreview'), bdl=$('#btnBkDownload');
-  if(bok) bok.disabled=!admin;
-  if(bdl) bdl.disabled=!admin;
-  const lock=$('#bkLockTag'); if(lock) lock.style.display=admin?'none':'';
-  const bmsg=$('#bkAdminMsg'); if(bmsg) bmsg.style.display=admin?'none':'';
   $('#btnAdminLogin').style.display=admin?'none':'';
   $('#btnAdminLogout').style.display=admin?'':'none';
   $('#adminState').textContent=admin?'当前身份：管理员（可清空历史库 / 导出备份 / 删除供应商）':'当前身份：普通用户（无清空与导出权限）';
   $('#adminState').classList.toggle('is-admin',admin);
   // 删除按钮的可见性取决于管理员身份，身份变化后重新渲染供应商表格
   if(state.suppliers.length) renderSupplierTable();
+}
+// 切换管理员身份后重载：后端据此增删「账单备份导出」整块 DOM，
+// 避免出现"前端显示但服务端不认"或反之的中间态。用 sessionStorage 记住当前标签页。
+function reloadKeepTab(){
+  try{ sessionStorage.setItem('wb_active_tab', state.tab||'history'); }catch(e){}
+  location.reload();
 }
 async function loadAuth(){
   try{
@@ -660,10 +713,9 @@ $('#btnAdminConfirm').addEventListener('click',async()=>{
       body:JSON.stringify({password:$('#adminPassword').value})});
     const r=await resp.json();
     if(r.ok){
-      state.isAdmin=true; applyAdminUI();
-      $('#adminModal').classList.remove('show');
-      $('#histMsg').className='msg ok'; $('#histMsg').textContent=r.msg||'已获得清空权限';
-      toast('管理员登录成功');
+      state.isAdmin=true;
+      try{ sessionStorage.setItem('wb_flash','管理员登录成功，管理员功能已显示'); }catch(e){}
+      reloadKeepTab();          // 重载：服务端据此渲染出「账单备份导出」整块
     } else {
       $('#adminMsg').className='msg error'; $('#adminMsg').textContent=r.error||'登录失败';
     }
@@ -671,9 +723,24 @@ $('#btnAdminConfirm').addEventListener('click',async()=>{
 });
 $('#btnAdminLogout').addEventListener('click',async()=>{
   await fetch('/api/auth/logout',{method:'POST'});
-  state.isAdmin=false; applyAdminUI();
-  $('#histMsg').className='msg ok'; $('#histMsg').textContent='已退出管理员模式';
-  toast('已退出管理员');
+  state.isAdmin=false;
+  try{ sessionStorage.setItem('wb_flash','已退出管理员模式，管理员功能已隐藏'); }catch(e){}
+  reloadKeepTab();            // 重载：服务端不再渲染「账单备份导出」，入口彻底消失
 });
 
-loadStatus(); loadHistBatches(); loadAuth(); loadSuppliers(); loadSupplierHistory();
+// ===== 初始化 =====
+// 登录/退出管理员会整页重载（服务端据此增删管理员模块），所以这里要能回到原来的标签页。
+(function init(){
+  let tab='history';
+  try{
+    const saved=sessionStorage.getItem('wb_active_tab');
+    if(saved && document.querySelector('.tab[data-tab="'+saved+'"]')) tab=saved;
+    sessionStorage.removeItem('wb_active_tab');
+  }catch(e){}
+  activateTab(tab);
+  loadStatus(); loadAuth(); loadSuppliers();
+  try{
+    const f=sessionStorage.getItem('wb_flash');
+    if(f){ sessionStorage.removeItem('wb_flash'); toast(f); }
+  }catch(e){}
+})();

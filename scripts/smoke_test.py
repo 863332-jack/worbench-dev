@@ -297,9 +297,17 @@ def main():
     check("非管理员：打包下载被拒 403 且提示明确",
           r.status_code == 403 and "仅管理员" in (r.json().get("error") or ""),
           "%s %s" % (r.status_code, r.text[:120]))
+    page = s.get(BASE + "/", timeout=20).text
+    check("非管理员：页面源码中根本没有导出入口（服务端不渲染）",
+          "账单备份导出" not in page and 'id="bkCard"' not in page
+          and 'id="btnBkDownload"' not in page, "len=%d" % len(page))
 
     # --- 管理员登录后可用 ---
     s.post(BASE + "/api/auth/login", json={"password": "13662566518"}, timeout=10)
+    page = s.get(BASE + "/", timeout=20).text
+    check("管理员：页面才渲染出导出入口",
+          "账单备份导出" in page and 'id="bkCard"' in page and 'id="btnBkDownload"' in page,
+          "len=%d" % len(page))
 
     # --- 按月份导出已取消 ---
     r = s.get(BASE + "/api/history/backup/preview?kinds=history&month_from=2027-01", timeout=20)
@@ -373,6 +381,23 @@ def main():
     check("备份分表可回灌（格式合法）且不产生重复",
           rr.get("ok") is True and after == before,
           "ok=%s before=%s after=%s" % (rr.get("ok"), before, after))
+
+    # 连续两次导出：文件名必须唯一，后者不能覆盖前者（并发导出会互相踩）
+    def _dl_name(resp):
+        cd = resp.headers.get("Content-Disposition", "")
+        for part in cd.split(";")[1:]:
+            part = part.strip()
+            if part.lower().startswith("filename="):
+                return part[9:].strip('"')
+        return ""
+    d1 = s.get(BASE + "/api/history/backup?kinds=history", timeout=60)
+    d2 = s.get(BASE + "/api/history/backup?kinds=history", timeout=60)
+    n1, n2 = _dl_name(d1), _dl_name(d2)
+    check("连续导出文件名唯一，不覆盖上一个包",
+          d1.status_code == 200 and d2.status_code == 200 and n1 and n2 and n1 != n2,
+          "%s / %s" % (n1, n2))
+    check("两次导出都是完整 ZIP（含清单与说明）",
+          all(r.content[:2] == b"PK" for r in (d1, d2)), "%d/%d" % (len(d1.content), len(d2.content)))
 
     print("== 14. 智能对账：差异量化与汇总 ==")
     b2 = [["杰盛", "2027-03-10", "BK-1", "8*8", "铜", 10, 5, 50, ""],      # 单价 +1 → 金额 +10

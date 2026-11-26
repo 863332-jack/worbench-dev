@@ -13,8 +13,10 @@ import os
 import re
 import csv
 import json
+import uuid
 import hashlib
 import zipfile
+import tempfile
 from datetime import datetime
 from io import StringIO
 
@@ -100,6 +102,17 @@ def plan(filters):
             "date_filled": filled,
             "name": "%s_%s_全部记录.xlsx" % (KIND_LABELS.get(kind, kind), _safe(supplier)),
         })
+    # 分表名去重：供应商名里含 \ / : * ? " < > | 时会被归一化，理论上两家可能撞成同名，
+    # 那样后写的会覆盖前一个、ZIP 里还会出现重名条目。撞名时补序号，保证一表一文件。
+    used = {}
+    for f in files:
+        base = f["name"]
+        if base in used:
+            used[base] += 1
+            stem, ext = os.path.splitext(base)
+            f["name"] = "%s(%d)%s" % (stem, used[base], ext)
+        else:
+            used[base] = 1
     return files, groups
 
 
@@ -156,11 +169,15 @@ def build(filters):
     if not files:
         raise ValueError("当前条件下没有可导出的账单数据，请检查供应商勾选与账单类型")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     name = zip_name(filters, files)
     path = os.path.join(OUTPUT_DIR, name)
-    tmpdir = os.path.join(OUTPUT_DIR, "_backup_tmp_%s" % ts)
-    os.makedirs(tmpdir, exist_ok=True)
+    # 同一秒内并发导出会撞名，后者覆盖前者、还可能覆盖到正在被下载的那个包
+    if os.path.exists(path):
+        stem, ext = os.path.splitext(name)
+        name = "%s_%s%s" % (stem, uuid.uuid4().hex[:6], ext)
+        path = os.path.join(OUTPUT_DIR, name)
+    # 临时目录必须唯一：两次并发同时用同一个目录会互相删对方的文件
+    tmpdir = tempfile.mkdtemp(prefix="_backup_tmp_", dir=OUTPUT_DIR)
 
     manifest_files = []
     try:

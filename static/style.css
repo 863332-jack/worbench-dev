@@ -54,10 +54,10 @@ select,input[type=text]{ padding:9px 12px; border:1px solid var(--line); border-
 .btn.primary:disabled{ background:#9db8f0; cursor:not-allowed; }
 .btn.ghost:disabled{ color:#b6bfcc; border-color:var(--line); background:#f7f9fc; cursor:not-allowed; }
 .btn.primary:disabled:hover{ background:#9db8f0; }
-/* 仅管理员可用的入口标记 */
-.lock-tag{ font-size:12px; font-weight:550; color:var(--orange); background:var(--orange-bg);
-  border:1px solid #f0dcc4; border-radius:999px; padding:3px 10px; white-space:nowrap; }
-.head-actions .lock-tag:only-child{ margin-top:2px; }
+/* 仅管理员可见模块的标识 */
+.admin-tag{ font-size:12px; font-weight:550; color:var(--primary); background:#e8f0fe;
+  border:1px solid #cfdffb; border-radius:999px; padding:3px 10px; white-space:nowrap; }
+.head-actions .admin-tag:only-child{ margin-top:2px; }
 .btn.ghost{ background:#fff; border-color:var(--line); color:var(--muted); }
 .btn.danger{ color:var(--red); border-color:#f0c9c9; }
 .btn.small{ padding:6px 12px; font-size:12px; }
