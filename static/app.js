@@ -149,9 +149,11 @@ $('#btnHistReset').addEventListener('click',async()=>{
 });
 
 async function loadHistBatches(){
+  const cnt=$('#foldBatchesCount');
   try{
     const r=await fetch('/api/history/batches').then(x=>x.json());
     const el=$('#histBatches');
+    if(cnt) cnt.textContent = r.batches.length ? `共 ${r.batches.length} 个批次` : '暂无批次';
     if(!r.batches.length){ el.innerHTML='<div class="empty">暂无历史导入批次</div>'; return; }
     // 有效＝通过校验的行数；入库＝扣除重复后实际写入的条数（import_batch.error_rows 存的是重复跳过数）
     let h='<div class="detail-note">「有效」= 通过校验的行数；「入库」= 扣除重复后实际写入的条数；「重复跳过」按「供应商+型号+单价+账单日期+数量+合计金额+备注」整体判定 —— 日期或明细内容不同即为不同发货，全部入库。</div>';
@@ -162,7 +164,7 @@ async function loadHistBatches(){
       <td>${b.total_rows}</td><td>${b.valid_rows}</td><td><b>${ins}</b></td><td>${b.excluded_rows}</td>
       <td>${b.error_rows}</td><td>${esc(b.status)}</td><td>${esc(b.created_at)}</td></tr>`; });
     el.innerHTML=h+'</tbody></table>';
-  }catch(e){ $('#histBatches').innerHTML='<div class="empty">批次加载失败，请刷新重试</div>'; }
+  }catch(e){ $('#histBatches').innerHTML='<div class="empty">批次加载失败，请刷新重试</div>'; if(cnt) cnt.textContent='加载失败'; }
 }
 
 // Reconcile
@@ -504,8 +506,13 @@ function renderSupplierHistory(r){
     box.innerHTML=h+'</tbody></table>';
   }
 
-  const evBox=$('#shEvents');
-  if(!events.length){ evBox.innerHTML=''; return; }
+  const evBox=$('#shEvents'), evCnt=$('#foldEventsCount');
+  if(!events.length){
+    if(evCnt) evCnt.textContent='暂无记录';
+    evBox.innerHTML='<div class="empty">暂无状态变化记录（数据新增、变更或失效后才会产生）</div>';
+    return;
+  }
+  if(evCnt) evCnt.textContent = events.length>12 ? `最近 12 条 / 共 ${events.length} 条` : `共 ${events.length} 条`;
   let eh='<div class="detail-note">最近状态变化（新增 / 变更 / 失效，自动记录，不重复写入）</div><div class="tablewrap">';
   events.slice(0,12).forEach(e=>{
     eh+=`<div class="ev"><span class="t">${esc(e.at||'')}</span><span class="k">${esc(e.supplier||'')} · ${esc(e.period||'')}</span>

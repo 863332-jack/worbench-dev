@@ -34,6 +34,25 @@ import recon_stats
 
 app = Flask(__name__)
 
+
+# ---------- 静态资源版本号：取 style.css / app.js 的修改时间 ----------
+# 改了前端却没生效，多半是浏览器用了缓存。模板里带 ?v=<mtime>，文件一变 URL 就变，
+# 浏览器自然重新拉取；文件没变则继续命中缓存。
+def _asset_ver():
+    stamp = 0
+    for name in ("style.css", "app.js"):
+        try:
+            stamp = max(stamp, int(os.path.getmtime(os.path.join(app.static_folder, name))))
+        except OSError:
+            pass
+    return str(stamp or 1)
+
+
+@app.context_processor
+def _inject_asset_ver():
+    return {"asset_ver": _asset_ver()}
+
+
 # ---------- 会话密钥：随机生成一次并持久化（不随重启漂移，不可预测） ----------
 def _load_secret_key():
     path = os.path.join(config.DATA_DIR, ".secret_key")

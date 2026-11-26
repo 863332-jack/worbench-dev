@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>账单核对系统</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}?v={{ asset_ver }}">
 </head>
 <body>
 <div class="app">
@@ -58,8 +58,17 @@
       <div class="report" id="histReport"></div>
     </div>
     <div class="card">
-      <h2>已导入批次</h2>
-      <div class="tablewrap" id="histBatches"></div>
+      <details class="fold" id="foldBatches">
+        <summary class="fold-head">
+          <span class="fold-ico" aria-hidden="true"></span>
+          <h2>已导入批次</h2>
+          <span class="fold-count" id="foldBatchesCount"></span>
+          <span class="fold-hint" data-closed="展开明细" data-open="收起明细"></span>
+        </summary>
+        <div class="fold-body">
+          <div class="tablewrap" id="histBatches"></div>
+        </div>
+      </details>
     </div>
     <div class="card">
       <div class="card-head">
@@ -80,7 +89,17 @@
       </div>
       <div class="statcards" id="shStats"></div>
       <div class="tablewrap" id="shTable"><div class="empty">加载中…</div></div>
-      <div class="report" id="shEvents"></div>
+      <details class="fold fold-sub" id="foldEvents">
+        <summary class="fold-head">
+          <span class="fold-ico" aria-hidden="true"></span>
+          <h3>历史记录</h3>
+          <span class="fold-count" id="foldEventsCount"></span>
+          <span class="fold-hint" data-closed="展开查看" data-open="收起历史记录"></span>
+        </summary>
+        <div class="fold-body">
+          <div class="report" id="shEvents"></div>
+        </div>
+      </details>
     </div>
     <div class="card">
       <div class="card-head">
@@ -219,6 +238,6 @@
     </div>
   </div>
 </div>
-<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script src="{{ url_for('static', filename='app.js') }}?v={{ asset_ver }}"></script>
 </body>
 </html>

@@ -417,6 +417,21 @@ def main():
           r4["summary"]["periods"] == 0 and r4["summary"]["rows_valid"] == 0
           and all(x["rows_valid"] == 0 for x in r4["rows"]), str(r4["summary"]))
 
+    # 失效期必须是「终态」：回归保护——曾经每次重建都会因文案里「原有效明细 N 条」
+    # 由上一条的 rows_valid 变成 0 而被判成变更，反复刷 updated_at 并堆重复失效事件。
+    ev_before2 = len(r4["events"])
+    rows_before2 = len(r4["rows"])
+    stamp_before = {x["period"]: x["updated_at"] for x in r4["rows"]}
+    for _ in range(2):
+        s.post(BASE + "/api/suppliers/history/rebuild", timeout=30)
+    r5 = s.get(BASE + "/api/suppliers/history", timeout=20).json()
+    stamp_after = {x["period"]: x["updated_at"] for x in r5["rows"]}
+    check("失效期重复重建不堆事件、不改更新时间（幂等终态）",
+          len(r5["events"]) == ev_before2 and len(r5["rows"]) == rows_before2
+          and stamp_after == stamp_before,
+          "事件 %d→%d，行数 %d→%d" % (ev_before2, len(r5["events"]),
+                                        rows_before2, len(r5["rows"])))
+
     print()
     print("=" * 48)
     print("冒烟测试结果：通过 %d 项 / 失败 %d 项" % (PASS, FAIL))

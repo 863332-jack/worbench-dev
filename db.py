@@ -435,6 +435,11 @@ def rebuild_supplier_history(ref="", conn=None):
                 # 整期已无数据 → 失效（保留一行用于展示状态变化，但不计入有效合计）
                 if old is None:
                     continue
+                if old.get("status") == "expired" and not (old.get("rows_valid") or 0):
+                    # 早已是失效态：既不再写行也不记事件。
+                    # 否则每次重启/重建都会因文案里「原有效明细 N 条」由上一条的 rows_valid
+                    # 变成 0 而被判成「变更」，反复刷新 updated_at 并堆出重复的失效事件。
+                    continue
                 status = "expired"
                 note = "该期间已无数据（被删除或清空），原有效明细 %d 条" % (old["rows_valid"] or 0)
                 events += _log_supplier_event(conn, supplier, period, "expired", note, ref)

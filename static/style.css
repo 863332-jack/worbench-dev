@@ -140,6 +140,31 @@ input[type=month]{ padding:8px 10px; border:1px solid var(--line); border-radius
 .audit-field{ font-weight:600; color:var(--primary); white-space:nowrap; }
 .audit-cause{ color:#55606e; max-width:340px; }
 .detail-note{ padding:8px 12px; margin-bottom:10px; background:#f2f5fa; border-radius:6px; font-size:12px; color:#556; }
+
+/* ── 折叠区块：默认收起，点标题展开/再点收起。用原生 <details>，
+      展开状态由浏览器自己维护，数据重绘（只换 fold-body 内的内容）不会丢状态 ── */
+.fold{ margin:0; }
+.fold>summary{ list-style:none; cursor:pointer; -webkit-tap-highlight-color:transparent; }
+.fold>summary::-webkit-details-marker{ display:none; }
+.fold>summary::marker{ content:''; }
+.fold-head{ display:flex; align-items:center; gap:10px; padding:1px 0; user-select:none; }
+.fold-head h2,.fold-head h3{ margin:0; }
+.fold-head h3{ font-size:14.5px; font-weight:650; }
+.fold-ico{ width:0; height:0; border-left:6px solid var(--muted);
+  border-top:4.5px solid transparent; border-bottom:4.5px solid transparent;
+  flex:0 0 auto; transition:transform .18s ease; }
+.fold[open] .fold-ico{ transform:rotate(90deg); }
+.fold>summary:hover .fold-ico{ border-left-color:var(--primary); }
+.fold>summary:hover h2,.fold>summary:hover h3{ color:var(--primary); }
+.fold-count{ font-size:12px; color:var(--muted); }
+.fold-hint{ margin-left:auto; font-size:12px; font-weight:550; color:var(--primary);
+  white-space:nowrap; padding:3px 10px; border:1px solid var(--line); border-radius:999px; }
+.fold>summary:hover .fold-hint{ border-color:var(--primary); }
+.fold-hint::after{ content:attr(data-closed); }
+.fold[open] .fold-hint::after{ content:attr(data-open); }
+.fold-body{ margin-top:14px; }
+.fold-sub{ margin-top:16px; padding-top:14px; border-top:1px solid var(--line); }
+.fold-sub>.fold-body{ margin-top:12px; }
 .detail-evidence{ margin-top:18px; }
 tr.st-match td{ background:var(--green-bg); }
 tr.st-review td{ background:var(--orange-bg, #fdf0e6); }
