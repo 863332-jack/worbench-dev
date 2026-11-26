@@ -80,7 +80,11 @@ def make_tif(path):
 
 
 def make_hist_xlsx(path):
-    """构造历史账单：杰盛 J55(4)/J83(3.5)，新新精密 M12 两档(5,7)，云锦 NP-50(6)。"""
+    """构造历史账单：
+    杰盛 J55(4) / J83(3.5)；
+    新新精密 M12 同规格两档价(5,7)；LSS-01 同型号两种规格(尺寸/材质/价均不同)；
+    云锦 NP-50(6)。
+    """
     wb = Workbook()
     ws = wb.active
     ws.title = "Sheet1"
@@ -90,6 +94,8 @@ def make_hist_xlsx(path):
         ["杰盛", "2026-07-03", "J83", "20*10", "铜", 500, 3.5, 1750, ""],
         ["新新精密", "2026-08-20", "M12", "D12*40", "铝", 80, 5, 400, ""],
         ["新新精密", "2026-09-20", "M12", "D12*40", "铝", 80, 7, 560, ""],
+        ["新新精密", "2026-08-10", "LSS-01", "D20*30", "钢", 50, 8, 400, ""],
+        ["新新精密", "2026-09-10", "LSS-01", "D20*50", "铜", 30, 9, 270, ""],
         ["云锦", "2026-08-05", "NP-50", "50*20", "塑料", 100, 6, 600, ""],
     ]
     for r in rows:
@@ -104,7 +110,35 @@ def items_payload(n, supplier="杰盛", model="J55"):
              "unit_price": 4, "required_date": "2026-12-31", "remark": ""} for i in range(n)]
 
 
+def guard_live_data():
+    """安全闸门：冒烟测试会导入并**清空**历史库、删除测试订单。
+
+    2026-11-26 起系统已在局域网实际使用（真实订单/历史数据可能已存在），
+    因此默认拒绝在有任何业务数据时运行；确需运行时显式设置 SMOKE_FORCE=1。
+    """
+    import sqlite3
+    db_path = os.path.join(ROOT, "data", "recon.db")
+    if not os.path.exists(db_path):
+        return
+    conn = sqlite3.connect(db_path)
+    busy = {}
+    for t in ("hist_price", "recon_batch", "po_order"):
+        try:
+            busy[t] = conn.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
+        except sqlite3.Error:
+            busy[t] = 0
+    conn.close()
+    if any(v for v in busy.values()) and os.environ.get("SMOKE_FORCE") != "1":
+        print("=" * 60)
+        print("已中止：数据库中存在业务数据 %s" % busy)
+        print("冒烟测试会导入并清空历史库、删除测试订单，为避免破坏真实数据默认不执行。")
+        print("确认可以清空时：先备份 data/recon.db，再用 SMOKE_FORCE=1 重新运行。")
+        print("=" * 60)
+        raise SystemExit(2)
+
+
 def main():
+    guard_live_data()
     os.makedirs(TMP, exist_ok=True)
     make_pdf(os.path.join(TMP, "drawing.pdf"))
     make_png(os.path.join(TMP, "receipt.png"))
@@ -131,21 +165,49 @@ def main():
     print("== 2. 准备历史账单（供型号匹配） ==")
     r = admin.post(BASE + "/api/history/upload",
                    files={"files": ("hist.xlsx", open(hist_file, "rb"))}, timeout=30).json()
-    check("历史数据导入 5 条", r.get("ok") and r.get("added") == 5, str(r)[:200])
+    check("历史数据导入 7 条", r.get("ok") and r.get("added") == 7, str(r)[:200])
 
-    print("== 3. 型号匹配三态 ==")
+    print("== 3. 型号匹配：自动填充与候选 ==")
     r = buyer.get(BASE + "/api/po/model-lookup?supplier=杰盛&model=J55", timeout=10).json()
     check("J55 匹配成功并回填", r.get("ok") and r.get("found") and r.get("size") == "15*8"
           and r.get("material") == "铜" and r.get("unit_price") == 4, str(r)[:200])
     check("J55 单档不告警", r.get("risk") is False)
+    # 自动填充必须带「来源」，否则无法复核
+    auto = r.get("auto") or {}
+    src = ((auto.get("size") or {}).get("source") or {})
+    check("自动填充字段带数据来源（账期/供应商/文件名·行号）",
+          all(k in auto for k in ("size", "material", "unit_price"))
+          and "2026-07" in src.get("text", "") and "杰盛" in src.get("text", "")
+          and "hist.xlsx" in src.get("text", "") and "行" in src.get("text", ""),
+          str(auto)[:300])
+    check("唯一口径时无歧义字段", (r.get("ambiguous") or []) == [], str(r.get("ambiguous")))
+    # 同规格两档价：尺寸/材质唯一可填，单价不唯一必须人工选
     r = buyer.get(BASE + "/api/po/model-lookup?supplier=新新精密&model=M12", timeout=10).json()
-    check("M12 多档价提示 risk", r.get("found") and r.get("risk") is True
-          and r.get("unit_price") == 5, str(r)[:200])
-    check("多档价提示文案含档价", "档单价" in (r.get("message") or ""), r.get("message", ""))
+    check("M12 多档价提示 risk", r.get("found") and r.get("risk") is True, str(r)[:200])
+    check("M12 尺寸/材质唯一仍自动填充",
+          r.get("size") == "D12*40" and r.get("material") == "铝", str(r)[:200])
+    check("M12 单价不唯一时不自动填充",
+          r.get("unit_price") is None and "unit_price" in (r.get("ambiguous") or [])
+          and "unit_price" not in (r.get("auto") or {}), str(r)[:250])
+    check("多档价提示含各档金额", "¥5" in (r.get("message") or "") and "¥7" in (r.get("message") or ""),
+          r.get("message", ""))
+    check("M12 返回 2 条候选且候选带来源",
+          len(r.get("candidates") or []) == 2
+          and all(c.get("source", {}).get("text") for c in r["candidates"]), str(r.get("candidates"))[:250])
+    # 同型号两种规格：尺寸/材质/单价全不唯一 → 一律不填，只给候选
+    r = buyer.get(BASE + "/api/po/model-lookup?supplier=新新精密&model=LSS-01", timeout=10).json()
+    check("LSS-01 多规格时尺寸/材质均不自动填充",
+          r.get("size") == "" and r.get("material") == ""
+          and set(r.get("ambiguous") or []) >= {"size", "material", "unit_price"}, str(r)[:250])
+    check("LSS-01 候选含两种规格",
+          sorted({(c.get("size"), c.get("material")) for c in r.get("candidates") or []})
+          == [("D20*30", "钢"), ("D20*50", "铜")], str(r.get("candidates"))[:250])
+    # 跨供应商 & 未命中
     r = buyer.get(BASE + "/api/po/model-lookup?supplier=杰盛&model=M12", timeout=10).json()
-    check("跨供应商不可见（杰盛查 M12 未找到）", r.get("ok") and r.get("found") is False)
+    check("跨供应商不可见（杰盛查 M12 未命中）", r.get("ok") and r.get("found") is False)
     r = buyer.get(BASE + "/api/po/model-lookup?supplier=杰盛&model=ZZ-999", timeout=10).json()
-    check("未找到型号返回提示", r.get("found") is False and "未找到" in (r.get("message") or ""))
+    check("未命中给出明确提示", r.get("found") is False
+          and "历史账单中没有" in (r.get("message") or ""), r.get("message", ""))
     r = buyer.get(BASE + "/api/po/model-lookup?supplier=&model=J55", timeout=10)
     check("未选供应商时匹配被拒 400", r.status_code == 400)
 
@@ -165,12 +227,16 @@ def main():
         check("分隔符归一：%s" % label, r.get("found") is True, "%r -> %s" % (typed, str(r)[:180]))
     r = buyer.get(BASE + "/api/po/model-lookup?supplier=杰盛&model=1002.0", timeout=10).json()
     check("数字型号尾随 .0 归一（无此型号时不误判异常）", r.get("found") is False, str(r)[:150])
-    # 近似：J55X 与 J55 不是同一个型号 → fuzzy，且不回填单价
+    # 相近型号：不自动填充任何字段，只给候选供选择
     r = buyer.get(BASE + "/api/po/model-lookup?supplier=杰盛&model=J55X", timeout=10).json()
-    check("近似匹配标记 fuzzy 且不回填单价",
-          r.get("found") is True and r.get("match_type") == "fuzzy"
-          and r.get("unit_price") is None and r.get("matched_model") == "J55", str(r)[:220])
-    check("近似匹配提示语含「请核对型号」", "核对" in (r.get("message") or ""), r.get("message", ""))
+    check("相近型号不自动填充（尺寸/材质/单价全留空）",
+          r.get("found") is True and r.get("match_type") == "prefix"
+          and r.get("size") == "" and r.get("material") == ""
+          and r.get("unit_price") is None and (r.get("auto") or {}) == {}, str(r)[:260])
+    check("相近型号给出候选且标明命中型号",
+          len(r.get("candidates") or []) == 1 and r.get("matched_model") == "J55"
+          and r["candidates"][0].get("source", {}).get("text"), str(r.get("candidates"))[:200])
+    check("相近型号提示需人工选择", "选择" in (r.get("message") or ""), r.get("message", ""))
     # 跨供应商诊断：杰盛查 M12 → 明确指出在新新精密存在
     r = buyer.get(BASE + "/api/po/model-lookup?supplier=杰盛&model=M12", timeout=10).json()
     check("跨供应商诊断指出正确供应商",

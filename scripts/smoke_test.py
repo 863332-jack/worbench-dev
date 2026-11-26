@@ -56,7 +56,35 @@ def make_xlsx(path, rows, sheet="Sheet1", extra_sheets=None):
     return path
 
 
+def guard_live_data():
+    """安全闸门：冒烟测试会导入并**清空**历史库、删除测试订单。
+
+    2026-11-26 起系统已在局域网实际使用（真实订单/历史数据可能已存在），
+    因此默认拒绝在有任何业务数据时运行；确需运行时显式设置 SMOKE_FORCE=1。
+    """
+    import sqlite3
+    db_path = os.path.join(ROOT, "data", "recon.db")
+    if not os.path.exists(db_path):
+        return
+    conn = sqlite3.connect(db_path)
+    busy = {}
+    for t in ("hist_price", "recon_batch", "po_order"):
+        try:
+            busy[t] = conn.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
+        except sqlite3.Error:
+            busy[t] = 0
+    conn.close()
+    if any(v for v in busy.values()) and os.environ.get("SMOKE_FORCE") != "1":
+        print("=" * 60)
+        print("已中止：数据库中存在业务数据 %s" % busy)
+        print("冒烟测试会导入并清空历史库、删除测试订单，为避免破坏真实数据默认不执行。")
+        print("确认可以清空时：先备份 data/recon.db，再用 SMOKE_FORCE=1 重新运行。")
+        print("=" * 60)
+        raise SystemExit(2)
+
+
 def main():
+    guard_live_data()
     os.makedirs(TMP, exist_ok=True)
     s = requests.Session()
 

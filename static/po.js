@@ -26,7 +26,25 @@ function todayIso() {
 function blankLine() {
   return { model: '', param: '', size: '', material: '', quantity: '', unit: '',
            unit_price: '', required_date: '', remark: '', drawingFile: null,
-           match: { state: 'empty', msg: '' } };
+           match: { state: 'empty', msg: '' }, _auto: {} };
+}
+
+// 自动填充字段的来源标注：浅蓝底 + 悬停显示「来源：账期·供应商·文件名 第N行」
+const PO_AUTO_FIELDS = ['param', 'size', 'material', 'unit_price'];
+const PO_AUTO_NAMES = { param: '参数', size: '尺寸', material: '材料', unit_price: '单价' };
+
+function autoMeta(l, f) {
+  const a = (l && l._auto) || {};
+  return a[f] || null;
+}
+function autoCls(l, f) {
+  return autoMeta(l, f) ? ' po-auto' : '';
+}
+function autoTip(l, f) {
+  const m = autoMeta(l, f);
+  if (!m) return '';
+  const src = (m.source && m.source.text) || '历史账单';
+  return ` title="自动填充·来源：${esc(src)}"`;
 }
 
 // ---------- 登录 / 身份 ----------
@@ -267,13 +285,27 @@ async function poReceive(no) {
 
 // ---------- 多行下单表单 ----------
 function matchShort(m) {
-  const map = { ok: '✓ 已匹配', near: '≈ 近似匹配', warn: '⚠ 需确认', miss: '✕ 未找到',
-                err: '✕ 查询失败', loading: '查询中…', empty: '—' };
+  const map = { ok: '✓ 已匹配', picked: '✓ 已选定', near: '≈ 相近型号', warn: '⚠ 需确认',
+                miss: '✕ 未找到', err: '✕ 查询失败', loading: '查询中…', empty: '—' };
   return map[m && m.state] || '—';
 }
 function matchClass(m) {
-  return { ok: 'po-ok', near: 'po-warn', warn: 'po-warn', miss: 'po-miss',
+  return { ok: 'po-ok', picked: 'po-ok', near: 'po-warn', warn: 'po-warn', miss: 'po-miss',
            err: 'po-miss', loading: 'po-loading' }[(m && m.state)] || '';
+}
+
+// 是否需要「选择」：多候选、相近型号、或字段不唯一时为 true；完全确定（ok）则不打扰
+function needPick(l) {
+  const m = (l && l.match) || {};
+  const c = m.candidates || [];
+  if (!c.length) return false;
+  if (c.length > 1) return true;
+  return m.state !== 'ok';
+}
+function pickLabel(l) {
+  const m = (l && l.match) || {};
+  const n = (m.candidates || []).length;
+  return m.state === 'picked' ? '改选' : `选择 ${n}`;
 }
 
 function rowHtml(l, i) {
@@ -282,16 +314,20 @@ function rowHtml(l, i) {
        <span class="po-file-x" data-clear="${i}" title="移除该行图纸">✕</span>`
     : `<input type="file" class="po-file-input" data-file="${i}" accept="${PO_ACCEPT}">`;
   const price = (l.unit_price === null || l.unit_price === undefined) ? '' : l.unit_price;
+  const cands = (l.match && l.match.candidates) || [];
+  const pickBtn = needPick(l)
+    ? `<button class="po-pick" data-pick="${i}" title="历史账单中有 ${cands.length} 条记录，点此查看并选用">${pickLabel(l)}</button>`
+    : '';
   return `<tr data-idx="${i}">
     <td class="c-line">${i + 1}</td>
     <td><input class="po-cell-input po-cell-model" data-idx="${i}" data-field="model" value="${esc(l.model || '')}" placeholder="型号"></td>
-    <td class="c-match"><span class="po-match ${matchClass(l.match)}" title="${esc((l.match && l.match.msg) || '')}">${matchShort(l.match)}</span></td>
-    <td><input class="po-cell-input" data-idx="${i}" data-field="param" value="${esc(l.param || '')}" placeholder="自动"></td>
-    <td><input class="po-cell-input" data-idx="${i}" data-field="size" value="${esc(l.size || '')}" placeholder="自动"></td>
-    <td><input class="po-cell-input" data-idx="${i}" data-field="material" value="${esc(l.material || '')}" placeholder="自动"></td>
+    <td class="c-match"><span class="po-match ${matchClass(l.match)}" title="${esc((l.match && l.match.msg) || '')}">${matchShort(l.match)}</span>${pickBtn}</td>
+    <td><input class="po-cell-input${autoCls(l, 'param')}" data-idx="${i}" data-field="param" value="${esc(l.param || '')}" placeholder="自动"${autoTip(l, 'param')}></td>
+    <td><input class="po-cell-input${autoCls(l, 'size')}" data-idx="${i}" data-field="size" value="${esc(l.size || '')}" placeholder="自动"${autoTip(l, 'size')}></td>
+    <td><input class="po-cell-input${autoCls(l, 'material')}" data-idx="${i}" data-field="material" value="${esc(l.material || '')}" placeholder="自动"${autoTip(l, 'material')}></td>
     <td><input class="po-cell-input num" type="number" min="0.001" step="any" data-idx="${i}" data-field="quantity" value="${esc(l.quantity || '')}" placeholder="数量"></td>
     <td><input class="po-cell-input narrow" data-idx="${i}" data-field="unit" value="${esc(l.unit || '')}" placeholder="件"></td>
-    <td><input class="po-cell-input num" type="number" min="0" step="any" data-idx="${i}" data-field="unit_price" value="${esc(price)}" placeholder="参考"></td>
+    <td><input class="po-cell-input num${autoCls(l, 'unit_price')}" type="number" min="0" step="any" data-idx="${i}" data-field="unit_price" value="${esc(price)}" placeholder="参考"${autoTip(l, 'unit_price')}></td>
     <td><input class="po-cell-input" type="date" data-idx="${i}" data-field="required_date" value="${esc(l.required_date || '')}"></td>
     <td><input class="po-cell-input" data-idx="${i}" data-field="remark" value="${esc(l.remark || '')}" placeholder="特殊要求"></td>
     <td class="c-file">${fileCell}</td>
@@ -309,50 +345,168 @@ function renderEntry() {
 function updateMatchCell(idx) {
   const tr = document.querySelector(`#poEntryBody tr[data-idx="${idx}"]`);
   if (!tr) return;
+  const cell = tr.querySelector('.c-match');
   const span = tr.querySelector('.po-match');
-  if (!span) return;
+  if (!span || !cell) return;
   const m = poLines[idx].match || { state: 'empty', msg: '' };
   span.className = 'po-match ' + matchClass(m);
   span.textContent = matchShort(m);
   span.title = m.msg || '';
+  // 多条候选 → 显示「选择 N」按钮；唯一候选 → 隐藏
+  const cands = m.candidates || [];
+  let btn = cell.querySelector('.po-pick');
+  if (needPick(poLines[idx])) {
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.className = 'po-pick';
+      btn.type = 'button';
+      cell.appendChild(btn);
+    }
+    btn.dataset.pick = idx;
+    btn.textContent = pickLabel(poLines[idx]);
+    btn.title = `历史账单中有 ${cands.length} 条记录，点此查看并选用`;
+  } else if (btn) {
+    btn.remove();
+  }
 }
 
 function fillRowInputs(idx) {
   const tr = document.querySelector(`#poEntryBody tr[data-idx="${idx}"]`);
   if (!tr) return;
   const l = poLines[idx];
-  ['param', 'size', 'material', 'unit_price'].forEach(f => {
+  PO_AUTO_FIELDS.forEach(f => {
     const el = tr.querySelector(`[data-field="${f}"]`);
-    if (el) el.value = (l[f] === null || l[f] === undefined) ? '' : l[f];
+    if (!el) return;
+    el.value = (l[f] === null || l[f] === undefined) ? '' : l[f];
+    const meta = autoMeta(l, f);
+    el.classList.toggle('po-auto', !!meta);
+    if (meta) el.title = `自动填充·来源：${(meta.source && meta.source.text) || '历史账单'}`;
+    else el.removeAttribute('title');
   });
 }
 
+// 把一条候选/自动填充值写入行状态，并记录来源
+function applyField(idx, field, value, source) {
+  const l = poLines[idx];
+  if (!l) return;
+  l[field] = (value === null || value === undefined) ? '' : value;
+  if (!l._auto) l._auto = {};
+  if (value === null || value === undefined || value === '') delete l._auto[field];
+  else l._auto[field] = { value: value, source: source || { text: '历史账单' } };
+}
+
+// 撤掉该行所有「自动填充」的字段值（型号改动/匹配失效时使用），人工填写的值不动
+function clearAutoFields(idx) {
+  const l = poLines[idx];
+  if (!l || !l._auto) return;
+  Object.keys(l._auto).forEach(f => {
+    if (PO_AUTO_FIELDS.includes(f)) { l[f] = ''; delete l._auto[f]; }
+  });
+  const tr = document.querySelector(`#poEntryBody tr[data-idx="${idx}"]`);
+  if (tr) {
+    PO_AUTO_FIELDS.forEach(f => {
+      const el = tr.querySelector(`[data-field="${f}"]`);
+      if (el) {
+        el.value = '';
+        el.classList.remove('po-auto');
+        el.removeAttribute('title');
+      }
+    });
+  }
+}
+
 function renderMatchSummary() {
-  const miss = [], warn = [], near = [];
+  const miss = [], warn = [], near = [], autoLines = [];
   poLines.forEach((l, i) => {
     if (!(l.model || '').trim()) return;
     const st = l.match && l.match.state;
     if (st === 'miss') miss.push(i + 1);
     else if (st === 'near') near.push(i + 1);
     else if (st === 'warn' && l.match && l.match.risk) warn.push(i + 1);
+    // 自动填充来源逐行列出，便于复核「这个尺寸是从哪张账单来的」
+    const a = l._auto || {};
+    const filled = PO_AUTO_FIELDS.filter(f => a[f]);
+    if (filled.length) {
+      const src = (a[filled[0]].source && a[filled[0]].source.text) || '历史账单';
+      const desc = filled.map(f => `${PO_AUTO_NAMES[f]} ${a[f].value}`).join(' / ');
+      autoLines.push(`<li>第 ${i + 1} 行：${esc(desc)} ← 来源：${esc(src)}</li>`);
+    }
   });
   const el = $('#poMatchSummary');
   if (!el) return;
   let h = '';
+  if (autoLines.length) {
+    h += `<div class="po-note auto"><div class="po-note-title">自动填充字段及数据来源（历史账单）</div>
+      <ul class="po-auto-list">${autoLines.join('')}</ul></div>`;
+  }
   if (miss.length) {
-    h += `<div class="po-note warn">✕ 第 ${miss.join('、')} 行型号未找到历史记录：可手工填写参数/尺寸/材料后继续下单，或核对型号是否与历史账单写法一致（全角/乘号/小数点差异已自动兼容）。</div>`;
+    h += `<div class="po-note warn">✕ 第 ${miss.join('、')} 行未在历史账单中找到相同或相近型号：请手工填写尺寸/材质，或核对型号写法与供应商选择。</div>`;
   }
   if (near.length) {
     const detail = near.map(i => {
       const m = poLines[i - 1].match || {};
       return `第 ${i} 行 → ${m.matched || '相近型号'}`;
     }).join('；');
-    h += `<div class="po-note warn">≈ 第 ${near.join('、')} 行为近似匹配（未回填单价）：${esc(detail)}，请确认是否为同一零件。</div>`;
+    h += `<div class="po-note warn">≈ 第 ${near.join('、')} 行为相近型号（未自动填充，需人工选定）：${esc(detail)}，点「选择」查看候选记录。</div>`;
   }
   if (warn.length) {
-    h += `<div class="po-note warn">⚠ 第 ${warn.join('、')} 行匹配到多条历史记录（多档价）：已回填最低价，请人工确认适用单价。</div>`;
+    h += `<div class="po-note warn">⚠ 第 ${warn.join('、')} 行同型号存在多条不同记录（尺寸/材质/单价不唯一）：已列出候选，请点「选择」确定后再提交。</div>`;
   }
   el.innerHTML = h;
+}
+
+// ---------- 候选选择弹窗（历史账单多条命中时由人工定夺） ----------
+function poOpenPicker(idx) {
+  const l = poLines[idx];
+  if (!l) return;
+  const m = l.match || {};
+  const cands = m.candidates || [];
+  if (!cands.length) return;
+  poState.pickIdx = idx;
+  $('#poPickTitle').textContent = `第 ${idx + 1} 行 · 选择历史账单匹配项（${cands.length} 条）`;
+  $('#poPickHint').textContent = (m.matchLabel ? `匹配方式：${m.matchLabel}｜` : '')
+    + (m.msg || '请选择与实际需求一致的记录，选定后自动填充尺寸/材质/单价并标注来源。');
+  let h = '<div class="po-items-wrap"><table class="po-items-table po-cand-table"><thead><tr>'
+    + '<th>#</th><th>历史型号</th><th>尺寸</th><th>材质</th><th>单价</th>'
+    + '<th>账期</th><th>数据来源</th><th></th></tr></thead><tbody>';
+  cands.forEach((c, ci) => {
+    const src = (c.source && c.source.text) || '历史账单';
+    h += `<tr><td>${ci + 1}</td><td>${esc(c.model || '')}</td>
+      <td>${esc(c.size || '—')}</td><td>${esc(c.material || '—')}</td>
+      <td>${c.unit_price != null ? '¥' + c.unit_price : '—'}</td>
+      <td>${esc(c.period || '—')}</td>
+      <td class="muted">${esc(src)}</td>
+      <td><button class="btn primary small" data-adopt="${ci}">采用</button></td></tr>`;
+  });
+  h += '</tbody></table></div>';
+  $('#poPickBody').innerHTML = h;
+  $('#poPickBody').querySelectorAll('[data-adopt]').forEach(b => {
+    b.onclick = () => poAdoptCandidate(idx, Number(b.dataset.adopt));
+  });
+  $('#poPickModal').classList.add('show');
+}
+
+function poAdoptCandidate(idx, ci) {
+  const l = poLines[idx];
+  if (!l) return;
+  const cands = (l.match && l.match.candidates) || [];
+  const c = cands[ci];
+  if (!c) return;
+  const src = c.source || { text: '历史账单' };
+  // 只填这条记录里**确实有值**的字段，空值保持空白，不臆造
+  if (c.size) applyField(idx, 'size', c.size, src);
+  if (c.material) applyField(idx, 'material', c.material, src);
+  if (c.unit_price != null) applyField(idx, 'unit_price', c.unit_price, src);
+  if (c.unit_price != null) applyField(idx, 'param', `1 档价 ¥${c.unit_price}`, src);
+  l.match = Object.assign({}, l.match, {
+    state: 'picked',
+    matched: c.model || '',
+    msg: `已采用历史记录「${c.model || ''}」（${src.text}）：尺寸 ${c.size || '—'} / 材质 ${c.material || '—'}`
+         + (c.unit_price != null ? ` / 单价 ¥${c.unit_price}` : ''),
+  });
+  $('#poPickModal').classList.remove('show');
+  renderEntry();
+  toast('已按所选历史记录填充，来源已标注');
 }
 
 async function lookupModel(idx) {
@@ -373,6 +527,7 @@ async function lookupModel(idx) {
               + '&model=' + encodeURIComponent(model);
     const r = await fetch(url).then(x => x.json());
     if (line._lk !== token) return;   // 已有更新的查询，丢弃旧结果
+    const prevAuto = line._auto || {};
     if (!r.ok) {
       line.match = { state: 'err', msg: r.error || '查询失败' };
     } else if (!r.found) {
@@ -380,20 +535,25 @@ async function lookupModel(idx) {
       const extra = (r.suggestions && r.suggestions.length && !r.supplier_hint)
         ? '（历史中相近写法：' + r.suggestions.slice(0, 3).join('、') + '）' : '';
       line.match = { state: 'miss', msg: (r.message || '未找到') + extra, hint: r.supplier_hint || '' };
-    } else if (r.match_type === 'fuzzy') {
-      // 近似匹配：只回填尺寸/材料，不回填单价，强制人工核对
-      line.match = { state: 'near', msg: r.message, matched: r.matched_model || '' };
-      if (r.param) line.param = r.param;
-      if (r.size) line.size = r.size;
-      if (r.material) line.material = r.material;
+      // 上一次自动填充的字段已失效，撤掉，避免旧值冒充本次结果
+      PO_AUTO_FIELDS.forEach(f => { if (prevAuto[f]) applyField(idx, f, '', null); });
     } else {
-      line.match = { state: r.risk ? 'warn' : 'ok', risk: !!r.risk, msg: r.message,
-                     matched: r.matched_model || '' };
-      if (r.param) line.param = r.param;
-      if (r.size) line.size = r.size;
-      if (r.material) line.material = r.material;
-      if (r.unit_price !== null && r.unit_price !== undefined) line.unit_price = r.unit_price;
+      const auto = r.auto || {};
+      const amb = r.ambiguous || [];
+      const isNear = r.match_type !== 'exact';
+      // 只填后端判定「唯一确定」的字段并记录来源；其余留空交给人工选择/填写
+      PO_AUTO_FIELDS.forEach(f => {
+        if (auto[f]) applyField(idx, f, auto[f].value, auto[f].source);
+        else if (prevAuto[f]) applyField(idx, f, '', null);
+      });
+      line.match = {
+        state: isNear ? 'near' : (amb.length ? 'warn' : 'ok'),
+        msg: r.message, matched: r.matched_model || '', risk: !!r.risk,
+        matchLabel: r.match_label || '', ambiguous: amb,
+        candidates: r.candidates || [],
+      };
     }
+    // 就地更新徽章与「选择」按钮，不整行重绘，避免打断正在输入的其他单元格
     updateMatchCell(idx);
     fillRowInputs(idx);
     renderMatchSummary();
@@ -432,6 +592,18 @@ async function poCreateOrder() {
     errBox.innerHTML = '<div class="audit-title">请按下列清单修改后重新提交</div>'
       + '<ul class="audit-warns">' + errs.map(x => `<li>${esc(x)}</li>`).join('') + '</ul>';
     return;
+  }
+
+  // 存在多条候选但尚未选定的行：提交前二次确认，避免带着不确定信息下单
+  const pending = [];
+  poLines.forEach((l, i) => {
+    const m = l.match || {};
+    if (needPick(l) && m.state !== 'picked') pending.push(i + 1);
+  });
+  if (pending.length) {
+    const ok = confirm(`第 ${pending.join('、')} 行在历史账单中有多条候选记录尚未选定，`
+      + `尺寸/材质/单价可能不准确。\n\n建议先点该行「选择」按钮确定后再提交。\n\n仍要继续提交吗？`);
+    if (!ok) return;
   }
 
   const items = poLines.map((l, i) => ({
@@ -519,11 +691,17 @@ $('#poEntryBody').addEventListener('input', e => {
   const idx = Number(el.dataset.idx);
   if (!poLines[idx] || !PO_FIELDS.includes(field)) return;
   poLines[idx][field] = el.value;
-  // 型号被改写后，旧的匹配结论不再成立：立刻置空，等失焦重新匹配，
-  // 避免「型号已改、徽章还显示已匹配」的错标。
+  // 人工改动过的字段不再标「自动填充」，避免来源标注失真
+  if (PO_AUTO_FIELDS.includes(field) && poLines[idx]._auto && poLines[idx]._auto[field]) {
+    delete poLines[idx]._auto[field];
+    el.classList.remove('po-auto');
+    el.removeAttribute('title');
+  }
+  // 型号被改写后，旧的匹配结论与自动填充值都不再成立
   if (field === 'model') {
     const st = poLines[idx].match && poLines[idx].match.state;
     if (st && st !== 'empty' && st !== 'loading') {
+      clearAutoFields(idx);
       poLines[idx].match = { state: 'empty', msg: '' };
       updateMatchCell(idx);
       renderMatchSummary();
@@ -564,10 +742,12 @@ $('#poEntryBody').addEventListener('change', e => {
   poLines[idx].drawingFile = f;
   renderEntry();   // 重渲染显示文件名（其他行的输入值从状态恢复）
 });
-// 删除行 / 移除该行图纸
+// 删除行 / 移除该行图纸 / 打开候选选择
 $('#poEntryBody').addEventListener('click', e => {
-  const del = e.target.dataset && e.target.dataset.del;
-  const clear = e.target.dataset && e.target.dataset.clear;
+  const t = e.target;
+  const del = t.dataset && t.dataset.del;
+  const clear = t.dataset && t.dataset.clear;
+  const pick = t.dataset && t.dataset.pick;
   if (del !== undefined) {
     const idx = Number(del);
     poLines.splice(idx, 1);
@@ -576,6 +756,9 @@ $('#poEntryBody').addEventListener('click', e => {
   } else if (clear !== undefined) {
     const idx = Number(clear);
     if (poLines[idx]) { poLines[idx].drawingFile = null; renderEntry(); }
+  } else if (pick !== undefined) {
+    e.preventDefault();
+    poOpenPicker(Number(pick));
   }
 });
 
@@ -594,6 +777,10 @@ $('#btnPoCreate').addEventListener('click', poCreateOrder);
 $('#btnPoClose').addEventListener('click', () => $('#poDetailModal').classList.remove('show'));
 $('#poDetailModal').addEventListener('click', e => {
   if (e.target.id === 'poDetailModal') $('#poDetailModal').classList.remove('show');
+});
+$('#btnPoPickClose').addEventListener('click', () => $('#poPickModal').classList.remove('show'));
+$('#poPickModal').addEventListener('click', e => {
+  if (e.target.id === 'poPickModal') $('#poPickModal').classList.remove('show');
 });
 
 $$('#poFilters .chip').forEach(chip => chip.addEventListener('click', () => {

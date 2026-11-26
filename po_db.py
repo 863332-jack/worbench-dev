@@ -283,76 +283,235 @@ def list_suppliers():
 def _load_supplier_rows(conn, supplier):
     """取某供应商全部历史明细（近似的候选用；仅在精确匹配落空时才调用）。"""
     return conn.execute(
-        """SELECT model, model_norm, size, material, unit_price, period
-           FROM hist_price WHERE supplier=? ORDER BY period DESC, id DESC""",
+        "SELECT " + _HIST_COLS + " FROM hist_price WHERE supplier=? ORDER BY period DESC, id DESC",
         (supplier,),
     ).fetchall()
 
 
-def _fuzzy_candidates(rows, norm, model_raw):
-    """近似候选：先按忽略分隔符的宽松键，再按前缀/包含关系。返回 (命中行, 匹配说明)。"""
+# ---------- 型号匹配：候选检索 + 字段级溯源 ----------
+# 匹配强度由强到弱：完全一致 → 忽略符号一致 → 前缀相近
+MATCH_EXACT = "exact"        # 归一化后完全相同
+MATCH_RELATED = "related"    # 忽略分隔符/乘号/直径符号后相同
+MATCH_PREFIX = "prefix"      # 前缀或包含关系（相近型号）
+MATCH_NONE = "none"
+
+MATCH_LABELS = {
+    MATCH_EXACT: "型号完全一致",
+    MATCH_RELATED: "忽略符号差异后一致",
+    MATCH_PREFIX: "型号前缀相近",
+    MATCH_NONE: "无匹配",
+}
+
+# 单次返回的候选上限（超出只保留最新若干条）
+CANDIDATE_LIMIT = 12
+
+_HIST_COLS = "model, model_norm, size, material, unit_price, period, source_file, source_row, supplier"
+
+
+def _source_obj(r):
+    """把一条历史记录转成「数据来源」对象，供界面标注自动填充出处。"""
+    period = str(r.get("period") or "").strip()
+    supplier = str(r.get("supplier") or "").strip()
+    fname = os.path.basename(str(r.get("source_file") or "").strip())
+    row = r.get("source_row")
+    parts = [("%s 账单" % period) if period else "历史账单"]
+    if supplier:
+        parts.append(supplier)
+    if fname:
+        parts.append(fname + ((" 第 %d 行" % row) if row else ""))
+    return {"period": period, "supplier": supplier, "file": fname,
+            "row": row, "text": " · ".join(parts)}
+
+
+def _collect_candidates(conn, supplier, norm, model_raw):
+    """分层取候选记录。返回 (候选行列表, 匹配类型, 说明文字)。
+
+    严格按强度取一层，不与更弱的层混合 —— 避免把「不同规格的相近型号」
+    混进精确命中的结果里，从源头减少不确定信息。
+    """
+    exact = conn.execute(
+        "SELECT " + _HIST_COLS + " FROM hist_price WHERE supplier=? AND model_norm=? "
+        "ORDER BY period DESC, id DESC", (supplier, norm)).fetchall()
+    if exact:
+        return [dict(r, match_kind=MATCH_EXACT) for r in exact], MATCH_EXACT, ""
+    rows = _load_supplier_rows(conn, supplier)
     key = parsers.model_key(model_raw)
     if key:
-        same = [r for r in rows if parsers.model_key(r["model"]) == key]
-        if same:
-            return same, "忽略分隔符后一致"
-    pre = [r for r in rows
-           if r["model_norm"] and norm and
-           (r["model_norm"].startswith(norm) or norm.startswith(r["model_norm"]))]
+        rel = [r for r in rows if parsers.model_key(r["model"]) == key]
+        if rel:
+            return ([dict(r, match_kind=MATCH_RELATED) for r in rel], MATCH_RELATED,
+                    "忽略分隔符后一致")
+    pre = [r for r in rows if r["model_norm"] and norm
+           and (r["model_norm"].startswith(norm) or norm.startswith(r["model_norm"]))]
     if pre:
-        return pre, "前缀/包含关系"
-    return [], ""
+        return ([dict(r, match_kind=MATCH_PREFIX) for r in pre], MATCH_PREFIX,
+                "前缀/包含关系")
+    return [], MATCH_NONE, ""
+
+
+def _resolve_field(cands, field):
+    """字段级判定：唯一取值才允许自动填充；出现多个取值即判定为歧义，交给人工选择。
+
+    返回 (值或"", 来源 dict 或 None, 是否歧义, 全部取值列表)。
+    这样「同型号不同尺寸/材质」不会随便填一个进去。
+    """
+    vals = []
+    for c in cands:
+        v = str(c.get(field) or "").strip()
+        if v and v not in vals:
+            vals.append(v)
+    if len(vals) == 1:
+        src = next(c for c in cands if str(c.get(field) or "").strip() == vals[0])
+        return vals[0], _source_obj(src), False, vals
+    return "", None, len(vals) >= 2, vals
+
+
+def _fmt_result(cands, match_type, how, supplier, model_raw, total_matches):
+    """把候选整理成「回填值 + 候选列表 + 字段来源 + 歧义标记」。
+
+    只把**唯一确定**的字段放进 auto（前端据此自动填充并标注来源），
+    多值字段一律留空并要求用户从候选里选，避免填入不确定信息。
+    """
+    # 去重（同型号同尺寸同材质同价的重复账期只留最新一条），并截断候选数
+    uniq, seen = [], set()
+    for c in cands:
+        k = (c.get("model_norm"), c.get("size"), c.get("material"), c.get("unit_price"))
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(c)
+        if len(uniq) >= CANDIDATE_LIMIT:
+            break
+
+    size, size_src, size_amb, size_vals = _resolve_field(uniq, "size")
+    material, mat_src, mat_amb, mat_vals = _resolve_field(uniq, "material")
+
+    # 单价：只有唯一档价才自动填充（多档价 = 取决于规格，属不确定信息）
+    price_rows = [c for c in uniq if c.get("unit_price") and c["unit_price"] > 0]
+    levels = sorted({round(c["unit_price"], 4) for c in price_rows})
+    price_val, price_src = None, None
+    if len(levels) == 1:
+        price_val = levels[0]
+        price_src = _source_obj(next(c for c in price_rows
+                                     if round(c["unit_price"], 4) == levels[0]))
+    price_txt = " / ".join("¥%g" % p for p in levels) if levels else "无有效价"
+    param = ("%d 档价 %s" % (len(levels), price_txt)) if levels else ""
+
+    auto, ambiguous = {}, []
+    # 只有「型号完全一致」才谈自动填充；相近型号一律不填（等人工从候选中选定），
+    # 这是"避免填入不确定信息"的硬边界。
+    if match_type == MATCH_EXACT:
+        if size:
+            auto["size"] = {"value": size, "source": size_src}
+        elif size_amb:
+            ambiguous.append("size")
+        if material:
+            auto["material"] = {"value": material, "source": mat_src}
+        elif mat_amb:
+            ambiguous.append("material")
+        if price_val is not None:
+            auto["unit_price"] = {"value": price_val, "source": price_src}
+        elif len(levels) >= 2:
+            ambiguous.append("unit_price")
+        if param:
+            auto["param"] = {"value": param,
+                            "source": {"period": "", "supplier": supplier, "file": "",
+                                       "row": None,
+                                       "text": "综合自 %d 条历史记录" % len(cands)}}
+    else:
+        # 相近型号：字段值即使唯一也不填，避免把"另一个零件"的规格套上来
+        size = material = ""
+        price_val = None
+        ambiguous = [f for f, ok in (("size", bool(size_src)), ("material", bool(mat_src)),
+                                     ("unit_price", bool(price_src))) if ok]
+
+    matched_model = str(uniq[0].get("model") or "").strip()
+    risk = bool(ambiguous) or len(levels) >= 2
+    src_text = (size_src or mat_src or price_src or {}).get("text", "")
+
+    if match_type == MATCH_EXACT:
+        if ambiguous:
+            what = []
+            if size_amb:
+                what.append("尺寸（%s）" % " / ".join(size_vals))
+            if mat_amb:
+                what.append("材质（%s）" % " / ".join(mat_vals))
+            if "unit_price" in ambiguous:
+                what.append("单价（%s）" % price_txt)
+            msg = ("型号与历史账单完全一致，但同一型号存在 %d 条不同记录，%s 不唯一："
+                   "已列出候选，请选择后再填充，未自动填入以免填错"
+                   % (len(uniq), "、".join(what)))
+        else:
+            msg = "已按历史账单自动填充尺寸 / 材质 / 单价（来源：%s）" % src_text
+    else:
+        msg = ("型号「%s」未与历史账单完全一致，按%s匹配到 %d 条相近记录（如「%s」）："
+               "已列出候选，请选择其中一条后填充，不自动填入不确定信息"
+               % (model_raw, how or MATCH_LABELS.get(match_type, "近似"), len(uniq), matched_model))
+
+    suggestions = []
+    for c in uniq:
+        m = str(c.get("model") or "").strip()
+        if m and m not in suggestions:
+            suggestions.append(m)
+
+    return {
+        "found": True, "match_type": match_type, "match_label": MATCH_LABELS.get(match_type, ""),
+        "matches": total_matches, "risk": risk,
+        "size": size, "material": material, "param": param, "unit_price": price_val,
+        "matched_model": matched_model,
+        "suggestions": suggestions[:5],
+        "supplier_hint": "",
+        "auto": auto,
+        "ambiguous": ambiguous,
+        "ambiguous_values": {"size": size_vals, "material": mat_vals, "unit_price": levels},
+        "candidates": [_cand_public(c, match_type) for c in uniq],
+        "message": msg,
+    }
+
+
+def _cand_public(c, match_type):
+    """候选行的对外结构（含来源标注）。"""
+    return {
+        "model": str(c.get("model") or "").strip(),
+        "model_norm": c.get("model_norm") or "",
+        "size": str(c.get("size") or "").strip(),
+        "material": str(c.get("material") or "").strip(),
+        "unit_price": c.get("unit_price"),
+        "period": c.get("period") or "",
+        "match_kind": c.get("match_kind") or match_type,
+        "source": _source_obj(c),
+    }
 
 
 def lookup_model(supplier, model_raw):
-    """按「供应商 + 型号（归一化）」从历史账单匹配，返回回填数据与匹配状态。
+    """按「供应商 + 型号（归一化）」从历史账单检索，返回候选列表与可安全回填的字段。
 
-    分层策略（修复缺陷 P1-5：型号写法差异导致「历史有却显示未找到」）：
-      ① 精确：supplier + model_norm 全等（走索引，热路径）；
-      ② 近似：同一供应商下忽略分隔符差异 / 前缀包含关系 → 标记 match_type=fuzzy，
-         只回填尺寸与材料、不回填单价，前端强制提示「请核对型号」；
-      ③ 未命中时做跨供应商诊断：型号在其它供应商历史里存在则明确提示换供应商。
+    数据源：历史账单（hist_price，即入口 ① 导入的账单明细）。
+    流程：分层检索候选 → 字段级判定唯一性 → 只把唯一值放进 auto（附来源）
+    → 多值/近似一律交给用户从候选里选。
+
     返回 dict:
-      found / match_type(exact|fuzzy|none) / matches / risk
-      size / material / param / unit_price
-      matched_model: 命中的历史型号原文
-      suggestions: 近似型号列表（最多 5 个，供人工核对）
-      supplier_hint: 型号存在于其它供应商时的提示
-      message: 面向采购人员的提示
+      found / match_type(exact|related|prefix|none) / match_label / matches / risk
+      auto: {字段: {value, source}}  可自动填充的字段（size/material/unit_price/param）
+      ambiguous: ["size","material","unit_price"]  取值不唯一、必须人工选择的字段
+      candidates: 候选列表（型号/尺寸/材质/单价/账期/来源行）
+      size/material/unit_price/param: 等价于 auto 中的值（兼容旧调用方）
+      matched_model / suggestions / supplier_hint / message
     """
     norm = parsers.normalize_model(model_raw or "")
-    blank = {"found": False, "match_type": "none", "matches": 0, "risk": False,
-             "size": "", "material": "", "param": "", "unit_price": None,
-             "matched_model": "", "suggestions": [], "supplier_hint": ""}
+    blank = {"found": False, "match_type": MATCH_NONE, "match_label": MATCH_LABELS[MATCH_NONE],
+             "matches": 0, "risk": False, "size": "", "material": "", "param": "",
+             "unit_price": None, "matched_model": "", "suggestions": [], "supplier_hint": "",
+             "auto": {}, "ambiguous": [], "ambiguous_values": {}, "candidates": []}
     if not norm:
         return dict(blank, message="请输入型号")
     conn = db.connect()
     try:
-        rows = conn.execute(
-            """SELECT model, size, material, unit_price, period
-               FROM hist_price WHERE supplier=? AND model_norm=?
-               ORDER BY period DESC, id DESC""",
-            (supplier, norm),
-        ).fetchall()
-        match_type = "exact"
-        if not rows:
-            # ② 近似匹配（仅同供应商，避免串料）
-            cands, how = _fuzzy_candidates(_load_supplier_rows(conn, supplier), norm, model_raw)
-            if cands:
-                rows, match_type = cands, "fuzzy"
-                sugg = []
-                for r in cands:
-                    m = str(r["model"] or "").strip()
-                    if m and m not in sugg:
-                        sugg.append(m)
-                return _fmt_result(rows, match_type, supplier, model_raw,
-                                   matched_model=sugg[0], suggestions=sugg[:5],
-                                   fuzzy_how=how)
-        if rows:
-            return _fmt_result(rows, "exact", supplier, model_raw,
-                               matched_model=str(rows[0]["model"] or "").strip())
+        cands, match_type, how = _collect_candidates(conn, supplier, norm, model_raw)
+        if cands:
+            return _fmt_result(cands, match_type, how, supplier, model_raw, len(cands))
 
-        # ③ 跨供应商诊断
+        # 未命中：做跨供应商诊断，给出可操作提示（不猜、不乱填）
         hint, sugg = "", []
         try:
             others = conn.execute(
@@ -360,50 +519,18 @@ def lookup_model(supplier, model_raw):
             ).fetchall()
             names = [str(r["supplier"]) for r in others if r["supplier"] and r["supplier"] != supplier]
             if names:
-                hint = ("该型号在供应商「%s」的历史中存在，当前所选供应商「%s」下没有记录，"
+                hint = ("该型号在供应商「%s」的历史账单中存在，当前所选供应商「%s」下没有记录，"
                         "请确认供应商是否选错" % ("、".join(names), supplier))
                 sugg = names
         except Exception:
             pass
-        msg = ("未找到该型号的历史记录（供应商「%s」+ 型号「%s」）："
-               "可手工填写参数/尺寸/材料后继续下单，或核对型号是否与历史账单一致" % (supplier, model_raw))
+        msg = ("历史账单中没有与「%s」相同或相近的型号（供应商「%s」）："
+               "可手工填写尺寸/材质后继续下单，或核对型号写法" % (model_raw, supplier))
         if hint:
             msg = hint
         return dict(blank, message=msg, supplier_hint=hint, suggestions=sugg)
     finally:
         conn.close()
-
-
-def _fmt_result(rows, match_type, supplier, model_raw, matched_model="",
-                suggestions=None, fuzzy_how=""):
-    """把命中的历史行整理成回填结果。fuzzy 时不回填单价（防止报错价）。"""
-    prices = sorted({round(r["unit_price"], 4) for r in rows
-                     if r["unit_price"] and r["unit_price"] > 0})
-    size = next((r["size"] for r in rows if r["size"]), "")
-    material = next((r["material"] for r in rows if r["material"]), "")
-    price_txt = " / ".join("¥%g" % p for p in prices) if prices else "无有效价"
-    risk = len(prices) >= 2
-    if match_type == "fuzzy":
-        msg = ("型号「%s」没有精确记录，按近似型号「%s」（%s）匹配到 %d 条历史：已回填尺寸/材料，"
-               "单价未回填，请核对型号是否为同一个零件"
-               % (model_raw, matched_model or "—", fuzzy_how or "近似", len(rows)))
-    elif risk:
-        msg = ("匹配到 %d 条历史记录，存在 %d 档单价（%s），已回填最低价 ¥%g，请人工确认适用价"
-               % (len(rows), len(prices), price_txt, prices[0]))
-    elif prices:
-        msg = "已匹配 %d 条历史记录并回填（单价 ¥%g）" % (len(rows), prices[0])
-    else:
-        msg = "匹配到 %d 条历史记录，但无有效单价" % len(rows)
-    return {
-        "found": True, "match_type": match_type, "matches": len(rows), "risk": risk,
-        "size": size, "material": material,
-        "param": "%d 档价 %s" % (len(prices), price_txt),
-        "unit_price": (prices[0] if prices and match_type == "exact" else None),
-        "matched_model": matched_model,
-        "suggestions": suggestions or [],
-        "supplier_hint": "",
-        "message": msg,
-    }
 
 
 def get_order(order_no):

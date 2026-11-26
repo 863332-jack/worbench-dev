@@ -165,7 +165,7 @@
         <div class="po-toolbar">
           <button class="btn ghost small" id="btnPoAddLine">＋ 添加产品行</button>
           <span class="muted" id="poLineCount">已添加 0 / 50 行</span>
-          <span class="po-hint" id="poMatchHint">提示：先选择供应商，型号匹配依赖「供应商 + 型号」</span>
+          <span class="po-hint" id="poMatchHint">提示：先选供应商；型号失焦后按历史账单匹配，<span class="po-auto-legend">浅蓝底</span>为自动填充字段（悬停看数据来源）</span>
         </div>        <div class="po-table-wrap">
           <table class="po-entry-table">
             <thead><tr>
@@ -218,6 +218,18 @@
           <button class="btn primary" id="btnPoConfirm" style="display:none">确认接单</button>
           <button class="btn ghost danger" id="btnPoReject" style="display:none">拒接订单</button>
           <button class="btn ghost" id="btnPoClose">关闭</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 历史账单候选选择弹窗（同型号多条记录时由人工定夺） -->
+    <div class="modal" id="poPickModal">
+      <div class="modal-box wide">
+        <h3 id="poPickTitle">选择历史账单匹配项</h3>
+        <p class="muted" id="poPickHint"></p>
+        <div id="poPickBody"></div>
+        <div class="actions">
+          <button class="btn ghost" id="btnPoPickClose">取消</button>
         </div>
       </div>
     </div>
