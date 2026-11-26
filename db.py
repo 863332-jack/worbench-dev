@@ -338,6 +338,82 @@ def new_no(prefix):
 
 # ---------- 历史导入（单事务聚合） ----------
 
+# 去重口径版本：v1 只看「供应商+型号+单价+月份」（会合并同月同价的不同发货明细）；
+# v2 起时间与明细内容全部参与，见 dedup_key()。
+DEDUP_VERSION = 2
+
+
+def _norm_text(v):
+    return " ".join(str(v if v is not None else "").split())
+
+
+def dedup_key(r):
+    """发货明细去重键（v2）：**时间是区分记录的首要条件**。
+
+    规则：日期/数量/合计金额/备注任一项不同，即为不同发货明细，分别入库、不合并。
+    只有「供应商 + 型号 + 单价 + 日期 + 数量 + 合计金额 + 备注」全部相同才算同一条记录
+    （用于重复导入/备份回灌时不产生重复数据）。
+    """
+    return "|".join([
+        _norm_text(r.get("supplier")),
+        _norm_text(r.get("model_norm") or r.get("model")),
+        str(r.get("unit_price")),
+        str(r.get("date") or r.get("bill_date") or ""),   # 精确到日，不做月份层面的合并
+        str(r.get("period") or ""),
+        str(r.get("quantity")),
+        str(r.get("total_amount")),
+        _norm_text(r.get("remark")),
+    ])
+
+
+def dedup_hash(key, seq):
+    """内容键 + 同内容序号 → 哈希。序号保证「同一文件里两条完全相同的明细」各自入库且可幂等去重。"""
+    return hashlib.md5(("%s#%d" % (key, seq)).encode("utf-8")).hexdigest()
+
+
+def migrate_dedup_v2():
+    """把既有 hist_price 的 dedup_hash 升级到 v2 口径（幂等，用 PRAGMA user_version 记版本）。
+
+    必须在 refresh_model_norms() 之后执行：v2 键包含 model_norm。
+    仅重算哈希、不改动任何业务字段；旧口径下被合并掉的明细已无法从库内恢复，
+    需要用原始账单重新导入一次补齐（re-import 只会插入缺失的那些行）。
+    返回更新的行数。
+    """
+    conn = connect()
+    try:
+        ver = conn.execute("PRAGMA user_version").fetchone()[0]
+        if ver >= DEDUP_VERSION:
+            return 0
+        rows = conn.execute(
+            "SELECT id,supplier,model,model_norm,unit_price,period,bill_date,quantity,"
+            "total_amount,remark,dedup_hash FROM hist_price ORDER BY id"
+        ).fetchall()
+        counters, updates = {}, []
+        for row in rows:
+            d = dict(row)
+            key = dedup_key(d)
+            counters[key] = counters.get(key, 0) + 1
+            h = dedup_hash(key, counters[key])
+            if h != d["dedup_hash"]:
+                updates.append((h, d["id"]))
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            for h, i in updates:
+                conn.execute("UPDATE hist_price SET dedup_hash=? WHERE id=?", (h, i))
+            conn.execute("PRAGMA user_version=%d" % DEDUP_VERSION)
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except sqlite3.Error:
+                pass
+            raise
+        return len(updates)
+    finally:
+        conn.close()
+
+
 def _hist_insert_params(r, batch_no, dedup_hash):
     """构造 hist_price 插入参数：显式列出全部列，缺键补 None（兼容旧调用方）。"""
     return {
@@ -446,16 +522,17 @@ def import_history(staged):
                 "INSERT INTO import_batch(batch_no,kind,file_name,supplier,status,created_at) VALUES(?,?,?,?,?,?)",
                 (batch_no, "history", fname, meta.get("supplier", ""), "处理中", now()),
             )
-            dedup_rows, seen = [], set()
+            dedup_rows = []
+            seen = {}       # 完全相同内容的出现次数（用于区分「同日同价同量的多次发货」）
             for r in rows:
-                key = "|".join([r["supplier"], r["model_norm"], str(r["unit_price"]), r["period"]])
-                h = hashlib.md5(key.encode("utf-8")).hexdigest()
-                if h in seen:
-                    continue
-                seen.add(h)
+                # 去重键（v2）：时间必须参与 —— 日期不同即不同记录；
+                # 数量/合计金额/备注也参与，保证「同日同型号同价但发货量不同」的明细各自入库。
+                key = dedup_key(r)
+                seen[key] = seen.get(key, 0) + 1
+                h = dedup_hash(key, seen[key])
                 dedup_rows.append(_hist_insert_params(r, batch_no, h))
             n_inserted = _insert_hist_rows_conn(conn, dedup_rows)
-            dup = len(rows) - n_inserted   # 文件内重复 + 跨批次重复
+            dup = len(rows) - n_inserted   # 跨批次重复（同内容同时间才算重复）
             conn.execute(
                 "UPDATE import_batch SET total_rows=?,valid_rows=?,excluded_rows=?,error_rows=?,status=? WHERE batch_no=?",
                 (meta.get("total", 0), meta.get("valid", 0), n_warn, dup, "完成", batch_no),

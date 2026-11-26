@@ -87,6 +87,15 @@ try:
 except Exception:
     log.exception("型号归一化迁移失败（不影响启动，但历史型号匹配可能不准）")
 
+# 去重口径升级（v2）：时间与明细内容全部参与去重，同月同价的不同发货明细不再合并。
+# 必须在 refresh_model_norms 之后（键里含 model_norm）；幂等。
+try:
+    _n = db.migrate_dedup_v2()
+    if _n:
+        log.info("去重口径升级完成：重算 %d 条历史记录的 dedup_hash", _n)
+except Exception:
+    log.exception("去重口径升级失败（不影响启动，但可能与旧口径数据重复）")
+
 # ---------- 管理员登录失败锁定（内存计数，重启清零） ----------
 _login_fail = {"count": 0, "until": 0.0}
 

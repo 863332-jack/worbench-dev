@@ -353,6 +353,27 @@ def main():
     wb2 = load_workbook(os.path.join(TMP, "bk_result.xlsx"))
     check("结果 Excel 含「差异汇总」工作表", "差异汇总" in wb2.sheetnames, str(wb2.sheetnames))
 
+    print("== 15. 发货明细完整入库（v2 去重：时间与内容全部参与） ==")
+    det_rows = [["云锦", "2027-05-05", "DET-1", "", "铜", 10, 5, 50, ""],
+                ["云锦", "2027-05-05", "DET-1", "", "铜", 20, 5, 100, ""],  # 同日同价、数量不同
+                ["云锦", "2027-05-05", "DET-1", "", "铜", 10, 5, 50, ""],   # 与首行完全相同（同日两笔）
+                ["云锦", "2027-05-06", "DET-1", "", "铜", 10, 5, 50, ""],   # 仅日期不同
+                ["云锦", "2027-05-05", "DET-2", "", "铜", 10, 5, 50, ""]]   # 仅型号不同
+    f_det = make_xlsx(os.path.join(TMP, "det.xlsx"), det_rows)
+    r = s.post(BASE + "/api/history/upload", files={"files": open(f_det, "rb")}, timeout=30).json()
+    check("同月同价、日期/数量不同的明细全部入库（added=5）",
+          r.get("ok") is True and r.get("added") == 5, str(r)[:220])
+    r2 = s.post(BASE + "/api/history/upload", files={"files": open(f_det, "rb")}, timeout=30).json()
+    check("重复上传同一文件仍不产生重复（added=0）",
+          r2.get("ok") is True and r2.get("added") == 0, str(r2)[:220])
+    conn3 = sqlite3.connect(os.environ.get("SMOKE_DB_PATH") or os.path.join(ROOT, "data", "recon.db"))
+    got = conn3.execute("SELECT bill_date, quantity, total_amount FROM hist_price "
+                        "WHERE model='DET-1' ORDER BY bill_date, quantity").fetchall()
+    conn3.close()
+    check("库内明细可逐条还原（05-05 三条 + 05-06 一条）",
+          len(got) == 4 and [g[1] for g in got] == [10.0, 10.0, 20.0, 10.0], str(got))
+    check("数量/合计金额未被合并丢失", all(g[2] == g[1] * 5 for g in got), str(got))
+
     print()
     print("=" * 48)
     print("冒烟测试结果：通过 %d 项 / 失败 %d 项" % (PASS, FAIL))

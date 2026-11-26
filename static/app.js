@@ -154,7 +154,7 @@ async function loadHistBatches(){
     const el=$('#histBatches');
     if(!r.batches.length){ el.innerHTML='<div class="empty">暂无历史导入批次</div>'; return; }
     // 有效＝通过校验的行数；入库＝扣除重复后实际写入的条数（import_batch.error_rows 存的是重复跳过数）
-    let h='<div class="detail-note">「有效」= 通过校验的行数；「入库」= 扣除重复后实际写入的条数；「重复跳过」按「供应商+型号+单价+月份」判定（同月同型号同价只保留首行）。</div>';
+    let h='<div class="detail-note">「有效」= 通过校验的行数；「入库」= 扣除重复后实际写入的条数；「重复跳过」按「供应商+型号+单价+账单日期+数量+合计金额+备注」整体判定 —— 日期或明细内容不同即为不同发货，全部入库。</div>';
     h+='<table><thead><tr><th>批次号</th><th>文件</th><th>供应商</th><th>总行</th><th>有效</th><th>入库</th><th>提示</th><th>重复跳过</th><th>状态</th><th>时间</th></tr></thead><tbody>';
     r.batches.forEach(b=>{
       const ins=Math.max(0,(b.valid_rows||0)-(b.error_rows||0));
