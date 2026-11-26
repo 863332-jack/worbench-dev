@@ -16,6 +16,7 @@ from datetime import datetime
 from werkzeug.security import generate_password_hash, check_password_hash
 
 import db
+import parsers
 
 # 角色
 ROLE_PURCHASER = "purchaser"
@@ -91,7 +92,29 @@ CREATE TABLE IF NOT EXISTS po_user (
     display_name TEXT,
     created_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS po_order_item (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_no TEXT NOT NULL,
+    line_no INTEGER NOT NULL,         -- 行号（1 起）
+    model TEXT,                       -- 型号（匹配键）
+    param TEXT,                       -- 参数（历史档价摘要，可改）
+    size TEXT,                        -- 尺寸（历史回填，可改）
+    material TEXT,                    -- 材料（历史回填，可改）
+    quantity REAL,                    -- 下单数量
+    unit TEXT,
+    unit_price REAL,                  -- 单价（历史最低价回填，可改）
+    required_date TEXT,               -- 交货日期
+    remark TEXT,                      -- 特殊备注/处理要求
+    drawing_name TEXT,                -- 该行图纸原始文件名
+    drawing_path TEXT,                -- 该行图纸相对路径
+    created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_po_item_order ON po_order_item(order_no, line_no);
 """
+
+# 单次下单最多产品行数
+MAX_LINES = 50
 
 # 种子账号（首次启动创建；密码请首次登录后按需修改 config）
 SEED_USERS = [
@@ -145,15 +168,25 @@ def verify_user(username, password):
 
 # ---------- 订单 ----------
 
-def create_order(data, drawing_name, drawing_path, actor, order_no=None):
-    """创建订单并登记 create 事件。返回订单 dict。
+def create_order_multi(supplier, purchaser, remark, items, order_no=None):
+    """创建多行订单（1..MAX_LINES 行），单事务写订单头 + 明细行 + create 事件。
 
-    order_no 可由调用方预先生成（便于先按单号落图纸文件），缺省自动生成。
+    items: [{line_no, model, param, size, material, quantity, unit,
+             unit_price, required_date, remark, drawing_name, drawing_path}]
+    订单头字段由明细汇总：数量=总数量、金额=Σ(数量×单价)、交期=最早行交期。
     """
+    items = items or []
+    if not (1 <= len(items) <= MAX_LINES):
+        raise ValueError("订单行数必须为 1-%d 行，当前 %d 行" % (MAX_LINES, len(items)))
     order_no = order_no or new_order_no()
-    qty = float(data["quantity"])
-    price = data.get("unit_price")
-    total = round(qty * price, 2) if price is not None else None
+    total_qty = sum(float(it.get("quantity") or 0) for it in items)
+    total_amt = round(sum(float(it["quantity"]) * float(it["unit_price"])
+                          for it in items if it.get("unit_price") is not None), 2)
+    dates = [it["required_date"] for it in items if it.get("required_date")]
+    earliest = min(dates) if dates else ""
+    models = [str(it.get("model") or "") for it in items if it.get("model")]
+    title = ("多产品订单（%d 项）" % len(items)) if len(items) > 1 else (models[0] if models else "单产品订单")
+
     conn = db.connect()
     conn.isolation_level = None
     try:
@@ -163,15 +196,26 @@ def create_order(data, drawing_name, drawing_path, actor, order_no=None):
             (order_no,supplier,purchaser,product_name,model,quantity,unit,unit_price,total_amount,
              required_date,remark,drawing_name,drawing_path,status,created_at)
             VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (order_no, data["supplier"], actor, data["product_name"], data.get("model", ""),
-             qty, data.get("unit", ""), price, total, data.get("required_date", ""),
-             data.get("remark", ""), drawing_name, drawing_path, STATUS_PENDING, now()),
+            (order_no, supplier, purchaser, title, (models[0] if models else ""),
+             total_qty, "", None, total_amt, earliest, remark or "", "", "", STATUS_PENDING, now()),
         )
+        for it in items:
+            conn.execute(
+                """INSERT INTO po_order_item
+                (order_no,line_no,model,param,size,material,quantity,unit,unit_price,
+                 required_date,remark,drawing_name,drawing_path,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (order_no, it.get("line_no"), it.get("model", ""), it.get("param", ""),
+                 it.get("size", ""), it.get("material", ""), it.get("quantity"),
+                 it.get("unit", ""), it.get("unit_price"), it.get("required_date", ""),
+                 it.get("remark", ""), it.get("drawing_name", ""),
+                 it.get("drawing_path", ""), now()),
+            )
+        shown = "、".join(models[:5]) + ("等" if len(models) > 5 else "")
         conn.execute(
             "INSERT INTO po_event(order_no,action,actor,role,detail,created_at) VALUES(?,?,?,?,?,?)",
-            (order_no, "create", actor, ROLE_PURCHASER,
-             "提交下单：%s × %g%s，供应商 %s" % (data["product_name"], qty,
-                                          data.get("unit", "") or "", data["supplier"]), now()),
+            (order_no, "create", purchaser, ROLE_PURCHASER,
+             "提交下单：共 %d 项产品（%s），供应商 %s" % (len(items), shown, supplier), now()),
         )
         conn.execute("COMMIT")
     except Exception:
@@ -183,6 +227,59 @@ def create_order(data, drawing_name, drawing_path, actor, order_no=None):
     finally:
         conn.close()
     return get_order(order_no)
+
+
+def get_items(order_no):
+    """取订单明细行（按行号）。"""
+    conn = db.connect()
+    rows = conn.execute(
+        "SELECT * FROM po_order_item WHERE order_no=? ORDER BY line_no", (order_no,)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def lookup_model(supplier, model_raw):
+    """按「供应商 + 型号（归一化）」从历史账单匹配，返回回填数据与匹配状态。
+
+    返回 dict:
+      found: 是否存在历史记录
+      matches: 历史记录条数
+      risk: 是否存在多档单价（需人工确认适用价）
+      size/material/param/unit_price: 回填值（尺寸取最新记录，缺失时向前回退）
+      message: 面向采购人员的提示（未找到 / 多条需确认 / 已回填）
+    """
+    norm = parsers.normalize_model(model_raw or "")
+    if not norm:
+        return {"found": False, "matches": 0, "risk": False, "size": "", "material": "",
+                "param": "", "unit_price": None, "message": "请输入型号"}
+    conn = db.connect()
+    rows = conn.execute(
+        """SELECT model, size, material, unit_price, period
+           FROM hist_price WHERE supplier=? AND model_norm=?
+           ORDER BY period DESC, id DESC""",
+        (supplier, norm),
+    ).fetchall()
+    conn.close()
+    if not rows:
+        return {"found": False, "matches": 0, "risk": False, "size": "", "material": "",
+                "param": "", "unit_price": None,
+                "message": "未找到该型号的历史记录（供应商「%s」+ 型号「%s」）：可手工填写参数/尺寸/材料后继续下单，或核对型号是否正确"
+                           % (supplier, model_raw)}
+    prices = sorted({round(r["unit_price"], 4) for r in rows if r["unit_price"] and r["unit_price"] > 0})
+    size = next((r["size"] for r in rows if r["size"]), "")
+    material = next((r["material"] for r in rows if r["material"]), "")
+    price_txt = " / ".join("¥%g" % p for p in prices) if prices else "无有效价"
+    risk = len(prices) >= 2
+    if risk:
+        msg = ("匹配到 %d 条历史记录，存在 %d 档单价（%s），已回填最低价 ¥%g，请人工确认适用价"
+               % (len(rows), len(prices), price_txt, prices[0]))
+    else:
+        msg = "已匹配 %d 条历史记录并回填（单价 ¥%g）" % (len(rows), prices[0]) if prices else \
+              "匹配到 %d 条历史记录，但无有效单价" % len(rows)
+    return {"found": True, "matches": len(rows), "risk": risk, "size": size,
+            "material": material, "param": "%d 档价 %s" % (len(prices), price_txt),
+            "unit_price": (prices[0] if prices else None), "message": msg}
 
 
 def get_order(order_no):

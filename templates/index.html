@@ -149,35 +149,48 @@
         <button class="btn ghost small" id="btnPoLogout">退出登录</button>
       </div>
 
-      <!-- 采购方：新建订单 -->
+      <!-- 采购方：新建订单（多行产品） -->
       <div class="card" id="poCreateCard" style="display:none">
         <div class="card-head">
-          <div><h2>新建采购订单</h2>
-            <p class="muted">上传图纸并提交下单，订单进入「待确认」状态，由供应商确认接单。</p></div>
+          <div><h2>新建采购订单（多行产品录入）</h2>
+            <p class="muted">按表格逐行录入产品，每行一个产品、单次最多 50 行。输入型号后自动从历史账单匹配并回填参数 / 尺寸 / 材料 / 参考单价。</p></div>
         </div>
-        <div class="po-form">
-          <div class="form-row"><label>供应商 <span class="req">*</span></label>
-            <select id="poSupplier"><option value="">请选择</option>
-              <option>杰盛</option><option>新新精密</option><option>云锦</option></select></div>
-          <div class="form-row"><label>物料名称 <span class="req">*</span></label>
-            <input id="poProduct" placeholder="如：铜接头"></div>
-          <div class="form-row"><label>型号</label>
-            <input id="poModel" placeholder="如：J55"></div>
-          <div class="form-row"><label>数量 <span class="req">*</span></label>
-            <input id="poQty" type="number" min="0.001" step="any" placeholder="如：300"></div>
-          <div class="form-row"><label>单位</label>
-            <input id="poUnit" placeholder="件 / 个 / 米"></div>
-          <div class="form-row"><label>单价（元）</label>
-            <input id="poPrice" type="number" min="0" step="any" placeholder="可选"></div>
-          <div class="form-row"><label>期望交期</label>
-            <input id="poDue" type="date"></div>
-          <div class="form-row"><label>图纸 <span class="req">*</span></label>
-            <input id="poDrawing" type="file" accept=".pdf,.dwg,.dxf,.png,.jpg,.jpeg,.xlsx,.xls"></div>
-          <div class="form-row full"><label>备注</label>
-            <input id="poRemark" placeholder="可选，如材质、表面处理要求"></div>
+        <div class="form-row">
+          <label>供应商 <span class="req">*</span></label>
+          <select id="poSupplier"><option value="">请选择</option>
+            <option>杰盛</option><option>新新精密</option><option>云锦</option></select>
+          <label class="po-inline-label">整单备注</label>
+          <input id="poRemark" placeholder="可选（整单说明）">
         </div>
+        <div class="po-toolbar">
+          <button class="btn ghost small" id="btnPoAddLine">＋ 添加产品行</button>
+          <span class="muted" id="poLineCount">已添加 0 / 50 行</span>
+          <span class="po-hint" id="poMatchHint">提示：先选择供应商，型号匹配依赖「供应商 + 型号」</span>
+        </div>
+        <div class="po-table-wrap">
+          <table class="po-entry-table">
+            <thead><tr>
+              <th class="c-line">行</th>
+              <th class="c-model">型号 <span class="req">*</span></th>
+              <th class="c-match">匹配状态</th>
+              <th class="c-param">参数（历史档价）</th>
+              <th class="c-size">尺寸</th>
+              <th class="c-mat">材料</th>
+              <th class="c-qty">数量 <span class="req">*</span></th>
+              <th class="c-unit">单位</th>
+              <th class="c-price">单价（元）</th>
+              <th class="c-date">交货日期 <span class="req">*</span></th>
+              <th class="c-remark">特殊备注 / 处理要求</th>
+              <th class="c-file">图纸</th>
+              <th class="c-del"></th>
+            </tr></thead>
+            <tbody id="poEntryBody"></tbody>
+          </table>
+        </div>
+        <div id="poMatchSummary"></div>
         <div class="actions"><button class="btn primary" id="btnPoCreate">提交订单</button></div>
         <div class="msg" id="poCreateMsg"></div>
+        <div class="audit-box" id="poCreateErrors" style="display:none"></div>
       </div>
 
       <!-- 订单列表 -->

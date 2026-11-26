@@ -470,60 +470,114 @@ def api_po_me():
                    stats=po_db.stats())
 
 
+@app.route("/api/po/model-lookup")
+def api_po_model_lookup():
+    """按「供应商 + 型号」匹配历史账单，返回回填数据（参数/尺寸/材料/单价）与匹配状态。"""
+    s, err = po_require(po_db.ROLE_PURCHASER)
+    if err:
+        return err
+    supplier = (request.args.get("supplier") or "").strip()
+    model = (request.args.get("model") or "").strip()
+    if supplier not in ("杰盛", "新新精密", "云锦"):
+        return jsonify(ok=False, error="请先选择供应商，再按型号匹配历史"), 400
+    if not model:
+        return jsonify(ok=False, error="型号不能为空"), 400
+    return jsonify(ok=True, **po_db.lookup_model(supplier, model))
+
+
 @app.route("/api/po/orders", methods=["POST"])
 def api_po_create_order():
+    """多行下单：items_json（1-50 行）+ 行级图纸 drawing_<行号>。"""
     s, err = po_require(po_db.ROLE_PURCHASER)
     if err:
         return err
     form = request.form
     supplier = (form.get("supplier") or "").strip()
-    product = (form.get("product_name") or "").strip()
-    model = (form.get("model") or "").strip()
-    unit = (form.get("unit") or "").strip()
-    required_date = (form.get("required_date") or "").strip()
     remark = (form.get("remark") or "").strip()
-    drawing = request.files.get("drawing")
+    try:
+        items = json.loads(form.get("items_json") or "[]")
+    except Exception:
+        return jsonify(ok=False, error="产品行数据格式错误，请刷新页面重试"), 400
+    if not isinstance(items, list):
+        return jsonify(ok=False, error="产品行数据格式错误"), 400
+    if len(items) == 0:
+        return jsonify(ok=False, error="请至少添加 1 行产品", errors=["产品表格为空"]), 400
+    if len(items) > po_db.MAX_LINES:
+        return jsonify(ok=False,
+                       error="单次最多添加 %d 行产品，当前 %d 行，请分批下单"
+                             % (po_db.MAX_LINES, len(items)),
+                       errors=["产品行数超限（上限 %d 行）" % po_db.MAX_LINES]), 400
 
     errors = []
     if supplier not in ("杰盛", "新新精密", "云锦"):
         errors.append("「供应商」必须选择：杰盛 / 新新精密 / 云锦")
-    if not product:
-        errors.append("「物料名称」不能为空")
-    if len(product) > 100:
-        errors.append("「物料名称」不能超过 100 字")
-    qty, e = _po_num(form.get("quantity"), "数量", required=True)
-    if e:
-        errors.append(e)
-    price, e = _po_num(form.get("unit_price"), "单价", required=False)
-    if e:
-        errors.append(e)
-    if required_date:
-        try:
-            datetime.strptime(required_date, "%Y-%m-%d")
-        except ValueError:
-            errors.append("「期望交期」格式应为 YYYY-MM-DD（如 2026-12-31）")
-    if not drawing or not drawing.filename:
-        errors.append("必须上传图纸文件")
-    elif not _po_file_ok(drawing.filename):
-        errors.append("图纸格式不支持，允许：%s" % " ".join(po_db.DOC_EXTS))
+
+    clean_items = []
+    has_drawing = False
+    for idx, it in enumerate(items):
+        line = idx + 1
+        if not isinstance(it, dict):
+            errors.append("第 %d 行：数据格式错误" % line)
+            continue
+        model = str(it.get("model") or "").strip()
+        if not model:
+            errors.append("第 %d 行：「型号」不能为空" % line)
+        qty, e = _po_num(it.get("quantity"), "数量", required=True)
+        if e:
+            errors.append("第 %d 行：%s" % (line, e))
+        price, e = _po_num(it.get("unit_price"), "单价", required=False)
+        if e:
+            errors.append("第 %d 行：%s" % (line, e))
+        rdate = str(it.get("required_date") or "").strip()
+        if not rdate:
+            errors.append("第 %d 行：「交货日期」不能为空" % line)
+        else:
+            try:
+                datetime.strptime(rdate, "%Y-%m-%d")
+            except ValueError:
+                errors.append("第 %d 行：「交货日期」格式应为 YYYY-MM-DD" % line)
+        f = request.files.get("drawing_%d" % line)
+        if f and f.filename:
+            if not _po_file_ok(f.filename):
+                errors.append("第 %d 行：图纸格式不支持，允许：%s" % (line, " ".join(po_db.DOC_EXTS)))
+            else:
+                has_drawing = True
+        clean_items.append({
+            "line_no": line,
+            "model": model,
+            "param": str(it.get("param") or "").strip(),
+            "size": str(it.get("size") or "").strip(),
+            "material": str(it.get("material") or "").strip(),
+            "quantity": qty,
+            "unit": str(it.get("unit") or "").strip(),
+            "unit_price": price,
+            "required_date": rdate,
+            "remark": str(it.get("remark") or "").strip(),
+            "drawing_name": "", "drawing_path": "",
+        })
+    if not has_drawing:
+        errors.append("请至少为一行产品上传图纸文件")
     if errors:
         return jsonify(ok=False, error="表单校验未通过，订单未创建", errors=errors), 400
 
     order_no = po_db.new_order_no()
     try:
-        drawing_name, drawing_path = save_po_file(order_no, drawing, "drawing")
-        order = po_db.create_order(
-            {"supplier": supplier, "product_name": product, "model": model,
-             "quantity": qty, "unit": unit, "unit_price": price,
-             "required_date": required_date, "remark": remark},
-            drawing_name, drawing_path, s["display"] or s["username"], order_no=order_no)
+        for it in clean_items:
+            f = request.files.get("drawing_%d" % it["line_no"])
+            if f and f.filename:
+                it["drawing_name"], it["drawing_path"] = save_po_file(
+                    order_no, f, "line%d" % it["line_no"])
+        order = po_db.create_order_multi(supplier, s["display"] or s["username"],
+                                         remark, clean_items, order_no=order_no)
     except Exception as e:
         log.exception("创建采购订单失败")
         import shutil
         shutil.rmtree(os.path.join(config.PO_FILE_DIR, order_no), ignore_errors=True)
         return jsonify(ok=False, error="创建订单失败：%s" % str(e)), 500
-    log.info("采购下单成功：%s 供应商 %s 物料 %s 数量 %g", order_no, supplier, product, qty)
-    return jsonify(ok=True, order=order, msg="下单成功，订单号 %s，等待供应商确认接单" % order_no)
+    log.info("采购下单成功：%s 供应商 %s 共 %d 行，总数量 %g", order_no, supplier,
+             len(clean_items), order["quantity"])
+    return jsonify(ok=True, order=order, msg="下单成功，订单号 %s（%d 行产品），等待供应商确认接单"
+                                             % (order_no, len(clean_items)))
 
 
 @app.route("/api/po/orders")
@@ -554,7 +608,8 @@ def api_po_order_detail(order_no):
         acts = ["confirm", "reject"]
     if s["role"] == po_db.ROLE_PURCHASER and order["status"] == po_db.STATUS_CONFIRMED:
         acts = ["receive"]
-    return jsonify(ok=True, order=order, events=po_db.get_events(order_no),
+    return jsonify(ok=True, order=order, items=po_db.get_items(order_no),
+                   events=po_db.get_events(order_no),
                    actions=acts, labels=po_db.STATUS_LABELS)
 
 
@@ -658,8 +713,20 @@ def api_po_file(order_no):
     if s["role"] == po_db.ROLE_SUPPLIER and order["supplier"] != s["supplier"]:
         return jsonify(ok=False, error="无权下载其他供应商订单的附件"), 403
     kind = request.args.get("type", "drawing")
+    line = request.args.get("line")
     if kind == "drawing":
-        rel, shown = order.get("drawing_path"), order.get("drawing_name")
+        if line:
+            # 行级图纸：type=drawing&line=<行号>
+            try:
+                ln = int(line)
+            except (TypeError, ValueError):
+                return jsonify(ok=False, error="行号参数无效"), 400
+            item = next((x for x in po_db.get_items(order_no) if x["line_no"] == ln), None)
+            if not item:
+                return jsonify(ok=False, error="订单不存在该产品行"), 404
+            rel, shown = item.get("drawing_path"), item.get("drawing_name")
+        else:
+            rel, shown = order.get("drawing_path"), order.get("drawing_name")
     elif kind == "receipt":
         rel, shown = order.get("receipt_path"), order.get("receipt_name")
     else:
