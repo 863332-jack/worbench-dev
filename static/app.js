@@ -153,9 +153,14 @@ async function loadHistBatches(){
     const r=await fetch('/api/history/batches').then(x=>x.json());
     const el=$('#histBatches');
     if(!r.batches.length){ el.innerHTML='<div class="empty">暂无历史导入批次</div>'; return; }
-    let h='<table><thead><tr><th>批次号</th><th>文件</th><th>供应商</th><th>总行</th><th>有效</th><th>提示</th><th>重复</th><th>状态</th><th>时间</th></tr></thead><tbody>';
-    r.batches.forEach(b=>{ h+=`<tr><td>${esc(b.batch_no)}</td><td>${esc(b.file_name)}</td><td>${esc(b.supplier||'—')}</td>
-      <td>${b.total_rows}</td><td>${b.valid_rows}</td><td>${b.excluded_rows}</td><td>${b.error_rows}</td><td>${esc(b.status)}</td><td>${esc(b.created_at)}</td></tr>`; });
+    // 有效＝通过校验的行数；入库＝扣除重复后实际写入的条数（import_batch.error_rows 存的是重复跳过数）
+    let h='<div class="detail-note">「有效」= 通过校验的行数；「入库」= 扣除重复后实际写入的条数；「重复跳过」按「供应商+型号+单价+月份」判定（同月同型号同价只保留首行）。</div>';
+    h+='<table><thead><tr><th>批次号</th><th>文件</th><th>供应商</th><th>总行</th><th>有效</th><th>入库</th><th>提示</th><th>重复跳过</th><th>状态</th><th>时间</th></tr></thead><tbody>';
+    r.batches.forEach(b=>{
+      const ins=Math.max(0,(b.valid_rows||0)-(b.error_rows||0));
+      h+=`<tr><td>${esc(b.batch_no)}</td><td>${esc(b.file_name)}</td><td>${esc(b.supplier||'—')}</td>
+      <td>${b.total_rows}</td><td>${b.valid_rows}</td><td><b>${ins}</b></td><td>${b.excluded_rows}</td>
+      <td>${b.error_rows}</td><td>${esc(b.status)}</td><td>${esc(b.created_at)}</td></tr>`; });
     el.innerHTML=h+'</tbody></table>';
   }catch(e){ $('#histBatches').innerHTML='<div class="empty">批次加载失败，请刷新重试</div>'; }
 }
