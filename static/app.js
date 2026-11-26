@@ -61,7 +61,7 @@ $$('.tab').forEach(btn=>btn.addEventListener('click',()=>{
   $$('.tab').forEach(b=>b.classList.toggle('active',b===btn));
   $$('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+btn.dataset.tab));
   if(btn.dataset.tab==='results') loadResultBatches();
-  if(btn.dataset.tab==='history') loadHistBatches();
+  if(btn.dataset.tab==='history'){ loadHistBatches(); loadSupplierHistory(); }
   if(btn.dataset.tab==='reconcile') loadRcBatches();
 }));
 
@@ -126,7 +126,7 @@ $('#btnHistUpload').addEventListener('click',async(ev)=>{
     $('#histMsg').className='msg ok';
     $('#histMsg').textContent=(r.msg||`追加成功：历史明细 ${r.hist_rows} 条`) + ` · 型号基准 ${r.idx_count} 个`;
     $('#histReport').innerHTML=html+renderAuditErrors(null,r.warnings);
-    state.histFiles=[]; renderFiles('histFiles'); loadStatus(); loadHistBatches(); toast('数据已追加到历史库');
+    state.histFiles=[]; renderFiles('histFiles'); loadStatus(); loadHistBatches(); loadSupplierHistory(); toast('数据已追加到历史库');
   }catch(e){ $('#histMsg').className='msg error'; $('#histMsg').textContent='请求失败：'+e.message; }
   finally{ btn.disabled=false; btn.textContent=BTN_HIST_TEXT; }
 });
@@ -139,7 +139,7 @@ $('#btnHistReset').addEventListener('click',async()=>{
     const r=await resp.json();
     if(r.ok){
       $('#histMsg').className='msg ok'; $('#histMsg').textContent=r.msg||'已清空历史库';
-      toast('历史库已清空（已自动备份）'); loadStatus(); loadHistBatches(); $('#histReport').innerHTML='';
+      toast('历史库已清空（已自动备份）'); loadStatus(); loadHistBatches(); loadSupplierHistory(); $('#histReport').innerHTML='';
     } else {
       $('#histMsg').className='msg error'; $('#histMsg').textContent=r.error||'清空失败';
       toast('清空失败');
@@ -375,7 +375,7 @@ async function loadSuppliers(){
     const r=await fetch('/api/suppliers').then(x=>x.json());
     if(!r.ok) throw new Error(r.error||'加载失败');
     state.suppliers=r.suppliers||[];
-    renderSupplierSelects(); renderSupplierTable(); renderSupplierCheckboxes();
+    renderSupplierSelects(); renderSupplierTable(); renderSupplierCheckboxes(); renderShSupplierSelect();
   }catch(e){
     const msg='<div class="empty">供应商加载失败，请刷新重试</div>';
     ['#supTable','#supList'].forEach(id=>{ const el=$(id); if(el) el.innerHTML=msg; });
@@ -422,7 +422,7 @@ async function submitSupplier(){
     const r=await resp.json();
     if(!r.ok){ msg.className='msg error'; msg.textContent=r.error||'保存失败'; return; }
     state.suppliers=r.suppliers||[];
-    renderSupplierSelects(); renderSupplierTable(); renderSupplierCheckboxes();
+    renderSupplierSelects(); renderSupplierTable(); renderSupplierCheckboxes(); renderShSupplierSelect();
     msg.className='msg ok'; msg.textContent=r.msg||('已新增供应商「'+r.supplier.name+'」');
     $('#supName').value=''; $('#supAlias').value=''; $('#supRemark').value='';
     // 从下拉点进来的：直接把新供应商选上，省一次选择
@@ -447,11 +447,94 @@ async function deleteSupplier(sid){
     const r=await resp.json();
     if(!r.ok){ toast(r.error||'删除失败'); if(resp.status===403){ state.isAdmin=false; applyAdminUI(); } return; }
     state.suppliers=r.suppliers||[];
-    renderSupplierSelects(); renderSupplierTable(); renderSupplierCheckboxes();
+    renderSupplierSelects(); renderSupplierTable(); renderSupplierCheckboxes(); renderShSupplierSelect();
     const msg=$('#supMsg'); msg.className='msg ok'; msg.textContent=r.msg||'已删除';
     toast('供应商「'+name+'」已删除');
   }catch(e){ toast('删除请求失败：'+e.message); }
 }
+
+// ===== 供应商历史有效数据（按供应商 × 期间，写入后自动刷新） =====
+const SH_STATUS = { new:'新增', changed:'变更', steady:'无变化', expired:'失效', restored:'恢复' };
+
+function shStatusTag(st){
+  const cls = { new:'sh-new', changed:'sh-changed', steady:'sh-steady', expired:'sh-expired', restored:'sh-new' }[st] || 'sh-steady';
+  return `<span class="sh-status ${cls}">${SH_STATUS[st]||esc(st||'')}</span>`;
+}
+
+async function loadSupplierHistory(){
+  const p=new URLSearchParams();
+  if($('#shSupplier') && $('#shSupplier').value) p.set('supplier',$('#shSupplier').value);
+  if($('#shFrom').value) p.set('month_from',$('#shFrom').value);
+  if($('#shTo').value) p.set('month_to',$('#shTo').value);
+  if($('#shHideExpired').checked) p.set('include_expired','0');
+  try{
+    const r=await fetch('/api/suppliers/history?'+p.toString()).then(x=>x.json());
+    if(!r.ok) throw new Error(r.error||'查询失败');
+    renderSupplierHistory(r);
+  }catch(e){ $('#shTable').innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'; }
+}
+
+function renderSupplierHistory(r){
+  const s=r.summary||{}, rows=r.rows||[], events=r.events||[];
+  $('#shStats').innerHTML=`
+    <div class="stat"><div class="n">${s.periods||0}</div><div class="l">有效期间数</div>
+      <div class="hint">覆盖：${esc((s.suppliers||[]).join('、')||'—')}</div></div>
+    <div class="stat"><div class="n">${s.rows_valid||0}</div><div class="l">有效明细条数</div>
+      <div class="hint">已排除空价/待核价与失效期间${s.periods_expired?('；失效期间 '+s.periods_expired+' 个'):''}</div></div>
+    <div class="stat"><div class="n">${s.models||0}</div><div class="l">型号数</div>
+      <div class="hint">跨期去重</div></div>
+    <div class="stat"><div class="n">${money(s.amount_total)}</div><div class="l">金额合计</div>
+      <div class="hint">最近期间 ${esc(s.last_period||'—')}${s.min_price!==null&&s.min_price!==undefined?(' · 最低单价 '+s.min_price):''}</div></div>`;
+
+  const box=$('#shTable');
+  if(!rows.length){
+    box.innerHTML='<div class="empty">当前条件下没有历史记录，请放宽供应商/月份范围，或先导入历史账单</div>';
+  } else {
+    let h='<table><thead><tr><th>供应商</th><th>期间</th><th>状态</th><th>明细条数</th><th>有效明细</th>'+
+          '<th>型号数</th><th>最低单价</th><th>均价</th><th>金额合计</th><th>数据日期范围</th><th>来源文件</th><th>更新时间</th></tr></thead><tbody>';
+    rows.forEach(x=>{
+      const expired = !(x.rows_valid>0);
+      h+=`<tr class="${expired?'sh-row-expired':''}"><td><b>${esc(x.supplier)}</b></td><td>${esc(x.period)}</td>
+        <td>${shStatusTag(x.status)}</td><td>${x.rows_total||0}</td><td>${x.rows_valid||0}</td><td>${x.models||0}</td>
+        <td>${money(x.min_price)}</td><td>${x.avg_price===null||x.avg_price===undefined?'—':Number(x.avg_price).toFixed(2)}</td>
+        <td>${money(x.amount_total)}</td>
+        <td>${esc(x.first_date||'—')} ~ ${esc(x.last_date||'—')}</td>
+        <td>${esc(x.files||'—')}</td><td>${esc(x.updated_at||'—')}</td></tr>`;
+    });
+    box.innerHTML=h+'</tbody></table>';
+  }
+
+  const evBox=$('#shEvents');
+  if(!events.length){ evBox.innerHTML=''; return; }
+  let eh='<div class="detail-note">最近状态变化（新增 / 变更 / 失效，自动记录，不重复写入）</div><div class="tablewrap">';
+  events.slice(0,12).forEach(e=>{
+    eh+=`<div class="ev"><span class="t">${esc(e.at||'')}</span><span class="k">${esc(e.supplier||'')} · ${esc(e.period||'')}</span>
+      <span>${shStatusTag(e.event)}</span><span>${esc(e.detail||'')}</span>
+      <span class="t" style="margin-left:auto">${esc(e.ref||'')}</span></div>`;
+  });
+  evBox.innerHTML=eh+'</div>';
+}
+
+function renderShSupplierSelect(){
+  const el=$('#shSupplier'); if(!el) return;
+  const cur=el.value;
+  el.innerHTML='<option value="">全部供应商</option>'+
+    state.suppliers.map(s=>`<option value="${esc(s.name)}">${esc(s.name)}</option>`).join('');
+  if(cur) el.value=cur;
+}
+
+$('#btnShQuery').addEventListener('click',loadSupplierHistory);
+['#shSupplier','#shFrom','#shTo','#shHideExpired'].forEach(sel=>{
+  $(sel).addEventListener('change',loadSupplierHistory);
+});
+$('#btnSupHistRebuild').addEventListener('click',async()=>{
+  if(!state.isAdmin){ toast('需要管理员权限'); return; }
+  try{
+    const r=await fetch('/api/suppliers/history/rebuild',{method:'POST'}).then(x=>x.json());
+    toast(r.ok? (r.msg||'台账已重建') : (r.error||'重建失败'));
+    if(r.ok) loadSupplierHistory();
+  }catch(e){ toast('重建请求失败：'+e.message); }
+});
 
 // ===== 账单备份导出（筛选 → 预览 → 打包下载） =====
 function renderSupplierCheckboxes(){
@@ -519,6 +602,7 @@ $('#btnBkDownload').addEventListener('click',()=>{
 function applyAdminUI(){
   const admin=state.isAdmin;
   $('#btnHistReset').style.display=admin?'':'none';
+  const rb=$('#btnSupHistRebuild'); if(rb) rb.style.display=admin?'':'none';
   $('#btnAdminLogin').style.display=admin?'none':'';
   $('#btnAdminLogout').style.display=admin?'':'none';
   $('#adminState').textContent=admin?'当前身份：管理员（可清空历史库 / 删除供应商）':'当前身份：普通用户（无清空权限）';
@@ -560,4 +644,4 @@ $('#btnAdminLogout').addEventListener('click',async()=>{
   toast('已退出管理员');
 });
 
-loadStatus(); loadHistBatches(); loadAuth(); loadSuppliers();
+loadStatus(); loadHistBatches(); loadAuth(); loadSuppliers(); loadSupplierHistory();

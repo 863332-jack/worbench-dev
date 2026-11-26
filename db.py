@@ -132,6 +132,39 @@ CREATE TABLE IF NOT EXISTS supplier (
     created_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_supplier_active ON supplier(active, name);
+
+-- 供应商历史有效数据台账：按「供应商 × 期间」聚合的快照，写入后自动重算（唯一约束保证不重复写）
+CREATE TABLE IF NOT EXISTS supplier_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier TEXT NOT NULL,
+    period TEXT NOT NULL,            -- YYYY-MM（无月份记为「未标月份」）
+    rows_total INTEGER DEFAULT 0,    -- 该期明细条数
+    rows_valid INTEGER DEFAULT 0,    -- 有效明细条数（有效价：非空价/非待核价/单价>0）
+    models INTEGER DEFAULT 0,        -- 型号数
+    min_price REAL,                  -- 当期最低有效单价
+    avg_price REAL,                  -- 当期平均有效单价
+    amount_total REAL,               -- 金额合计（合计金额列，缺失时用 数量×单价）
+    first_date TEXT, last_date TEXT, -- 数据时间范围
+    files TEXT, batches TEXT,        -- 来源：文件 / 批次号
+    status TEXT,                     -- new 新增 / changed 变更 / steady 无变化 / expired 失效
+    change_note TEXT,                -- 与上期相比的变化说明
+    delta_rows INTEGER, delta_models INTEGER, delta_amount REAL,
+    created_at TEXT, updated_at TEXT,
+    UNIQUE(supplier, period)
+);
+CREATE INDEX IF NOT EXISTS idx_sup_hist ON supplier_history(supplier, period);
+
+-- 供应商数据状态变化事件（新增/变更/失效），dedup 唯一，保证同一变化只记一次
+CREATE TABLE IF NOT EXISTS supplier_event (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    supplier TEXT, period TEXT,
+    event TEXT,                      -- new / changed / expired / restored
+    detail TEXT,                     -- 变化说明（指标前后对比）
+    ref TEXT,                        -- 触发来源（批次号 / 初始化 / 清空）
+    at TEXT,
+    dedup TEXT UNIQUE
+);
+CREATE INDEX IF NOT EXISTS idx_sup_event ON supplier_event(supplier, at);
 """
 
 
@@ -328,6 +361,187 @@ def supplier_alias_map():
 
 def now():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ---------- 供应商历史有效数据（按供应商 × 期间聚合的台账） ----------
+
+# 有效明细口径：不含空价/待核价等排除行，且单价必须 > 0
+VALID_COND = "COALESCE(exclude_reason,'')='' AND unit_price IS NOT NULL AND unit_price>0"
+
+SUP_HIST_LABELS = {"new": "新增", "changed": "变更", "steady": "无变化",
+                   "expired": "失效", "restored": "恢复"}
+
+
+def _hist_agg(conn):
+    """按「供应商 × 期间」聚合 hist_price 的关键指标。"""
+    v = VALID_COND
+    sql = """
+        SELECT supplier,
+               COALESCE(NULLIF(period,''), '未标月份') AS period,
+               COUNT(*) AS rows_total,
+               SUM(CASE WHEN {v} THEN 1 ELSE 0 END) AS rows_valid,
+               COUNT(DISTINCT CASE WHEN {v} THEN model_norm END) AS models,
+               MIN(CASE WHEN {v} THEN unit_price END) AS min_price,
+               AVG(CASE WHEN {v} THEN unit_price END) AS avg_price,
+               SUM(CASE WHEN total_amount IS NOT NULL AND total_amount<>0 THEN total_amount
+                        ELSE quantity*unit_price END) AS amount_total,
+               MIN(bill_date) AS first_date, MAX(bill_date) AS last_date,
+               GROUP_CONCAT(DISTINCT source_file) AS files,
+               GROUP_CONCAT(DISTINCT batch_no) AS batches
+        FROM hist_price
+        GROUP BY supplier, period
+    """.format(v=v)
+    return {(r["supplier"], r["period"]): dict(r) for r in conn.execute(sql)}
+
+
+def _log_supplier_event(conn, supplier, period, event, detail, ref):
+    """记录一条状态变化事件；同一变化（含指标）只记一次。返回 1=新写入。"""
+    dedup = hashlib.md5(("%s|%s|%s|%s" % (supplier, period, event, detail)).encode("utf-8")).hexdigest()
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO supplier_event(supplier,period,event,detail,ref,at,dedup) VALUES(?,?,?,?,?,?,?)",
+        (supplier, period, event, detail, ref, now(), dedup))
+    return 1 if cur.rowcount else 0
+
+
+def rebuild_supplier_history(ref="", conn=None):
+    """重算供应商历史有效数据快照，并记录「新增/变更/失效/恢复」事件。
+
+    - 幂等：唯一键 (supplier, period) + upsert；指标无变化时不写库、不产生事件；
+    - 无效或过期数据不计入：只有有效价明细参与 rows_valid / models / min_price / avg_price，
+      整期无有效数据时 status=expired，且不会计入页面的「有效记录」合计。
+    返回 {"changed": 更新条数, "events": 新事件数}。
+    """
+    own = conn is None
+    conn = conn or connect()
+    try:
+        agg = _hist_agg(conn)
+        prev = {(r["supplier"], r["period"]): dict(r)
+                for r in conn.execute("SELECT * FROM supplier_history")}
+        keys = set(agg) | set(prev)
+        changed = events = 0
+        for key in sorted(keys):
+            supplier, period = key
+            cur = agg.get(key) or {
+                "supplier": supplier, "period": period, "rows_total": 0, "rows_valid": 0,
+                "models": 0, "min_price": None, "avg_price": None, "amount_total": 0.0,
+                "first_date": None, "last_date": None, "files": None, "batches": None,
+            }
+            old = prev.get(key)
+            d_rows = d_models = 0
+            d_amount = 0.0
+            note = ""
+
+            if not cur["rows_total"]:
+                # 整期已无数据 → 失效（保留一行用于展示状态变化，但不计入有效合计）
+                if old is None:
+                    continue
+                status = "expired"
+                note = "该期间已无数据（被删除或清空），原有效明细 %d 条" % (old["rows_valid"] or 0)
+                events += _log_supplier_event(conn, supplier, period, "expired", note, ref)
+            elif old is None:
+                status = "new"
+                note = "首次登记：明细 %d 条、有效 %d 条、型号 %d 个" % (
+                    cur["rows_total"], cur["rows_valid"], cur["models"])
+                events += _log_supplier_event(conn, supplier, period, "new", note, ref)
+            else:
+                d_rows = cur["rows_total"] - (old["rows_total"] or 0)
+                d_models = (cur["models"] or 0) - (old["models"] or 0)
+                d_amount = round((cur["amount_total"] or 0) - (old["amount_total"] or 0), 2)
+                same = (cur["rows_total"] == old["rows_total"]
+                        and cur["rows_valid"] == old["rows_valid"]
+                        and (cur["models"] or 0) == (old["models"] or 0)
+                        and abs((cur["amount_total"] or 0) - (old["amount_total"] or 0)) < 0.005
+                        and abs((cur["min_price"] or 0) - (old["min_price"] or 0)) < 1e-9)
+                if same:
+                    continue      # 指标未变：不更新时间、不产生事件（避免无意义的“实时刷新”）
+                if not (old["rows_valid"] or 0):
+                    status = "restored"
+                    note = "期间数据恢复：有效明细 0 → %d 条" % cur["rows_valid"]
+                    events += _log_supplier_event(conn, supplier, period, "restored", note, ref)
+                else:
+                    status = "changed"
+                    note = "明细 %+d 条、型号 %+d 个、金额 %+.2f" % (d_rows, d_models, d_amount)
+                    events += _log_supplier_event(conn, supplier, period, "changed", note, ref)
+
+            conn.execute(
+                """INSERT INTO supplier_history
+                   (supplier,period,rows_total,rows_valid,models,min_price,avg_price,amount_total,
+                    first_date,last_date,files,batches,status,change_note,delta_rows,delta_models,
+                    delta_amount,created_at,updated_at)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                   ON CONFLICT(supplier,period) DO UPDATE SET
+                     rows_total=excluded.rows_total, rows_valid=excluded.rows_valid,
+                     models=excluded.models, min_price=excluded.min_price,
+                     avg_price=excluded.avg_price, amount_total=excluded.amount_total,
+                     first_date=excluded.first_date, last_date=excluded.last_date,
+                     files=excluded.files, batches=excluded.batches, status=excluded.status,
+                     change_note=excluded.change_note, delta_rows=excluded.delta_rows,
+                     delta_models=excluded.delta_models, delta_amount=excluded.delta_amount,
+                     updated_at=excluded.updated_at""",
+                (supplier, period, cur["rows_total"], cur["rows_valid"], cur["models"],
+                 cur["min_price"], None if cur["avg_price"] is None else round(cur["avg_price"], 4),
+                 round(cur["amount_total"] or 0, 2), cur["first_date"], cur["last_date"],
+                 cur["files"], cur["batches"], status, note, d_rows, d_models, d_amount,
+                 now(), now()))
+            changed += 1
+        if own:
+            conn.commit()
+        return {"changed": changed, "events": events}
+    finally:
+        if own:
+            conn.close()
+
+
+def list_supplier_history(supplier=None, month_from="", month_to="", include_expired=True):
+    """按供应商 + 月份范围查询历史有效数据（含状态、来源、指标）。"""
+    sql = "SELECT * FROM supplier_history WHERE 1=1"
+    args = []
+    if supplier:
+        sql += " AND supplier=?"
+        args.append(supplier)
+    if month_from:
+        sql += " AND period>=?"       # 「未标月份」在范围查询时天然被排除（不算有效记录）
+        args.append(month_from)
+    if month_to:
+        sql += " AND period<=?"
+        args.append(month_to)
+    if not include_expired:
+        sql += " AND rows_valid>0"
+    # 有效期在前（按期间升序），失效期排到最后（保留痕迹但不干扰阅读）
+    sql += " ORDER BY supplier, CASE WHEN rows_valid>0 THEN 0 ELSE 1 END, period"
+    conn = connect()
+    try:
+        rows = [dict(r) for r in conn.execute(sql, args)]
+        # 期间数量/型号总数按实际数据口径补全（型号跨期去重）
+        where, wargs = [], []
+        if supplier:
+            where.append("supplier=?"); wargs.append(supplier)
+        if month_from:
+            where.append("COALESCE(NULLIF(period,''),'未标月份')>=?"); wargs.append(month_from)
+        if month_to:
+            where.append("COALESCE(NULLIF(period,''),'未标月份')<=?"); wargs.append(month_to)
+        wsql = (" WHERE " + " AND ".join(where)) if where else ""
+        models = conn.execute(
+            "SELECT COUNT(DISTINCT model_norm) FROM hist_price" + wsql +
+            ((" AND " if where else " WHERE ") + VALID_COND), wargs).fetchone()[0]
+        return rows, models
+    finally:
+        conn.close()
+
+
+def list_supplier_events(supplier=None, limit=80):
+    sql = "SELECT * FROM supplier_event"
+    args = []
+    if supplier:
+        sql += " WHERE supplier=?"
+        args.append(supplier)
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(limit)
+    conn = connect()
+    try:
+        return [dict(r) for r in conn.execute(sql, args)]
+    finally:
+        conn.close()
 
 
 def new_no(prefix):
@@ -542,6 +756,8 @@ def import_history(staged):
                             "total": meta.get("total", 0), "valid": meta.get("valid", 0),
                             "dup": dup, "batch_no": batch_no})
         idx_count = _rebuild_price_index_conn(conn)
+        # 供应商历史有效数据台账：与明细/索引同事务刷新，失败一起回滚
+        rebuild_supplier_history(ref=batch_no, conn=conn)
         hist_rows = conn.execute("SELECT COUNT(*) FROM hist_price").fetchone()[0]
         conn.execute("COMMIT")
         added = max(0, hist_rows - hist_before)
@@ -820,10 +1036,15 @@ def backup_db(tag="manual"):
 
 
 def clear_all():
-    """清空全部业务数据（保留结构）并 VACUUM 回收磁盘空间。"""
+    """清空全部业务数据（保留结构）并 VACUUM 回收磁盘空间。
+
+    清空后同步刷新供应商历史台账：各期间转为「失效」，事件留痕（不再计入有效记录）。
+    """
     conn = connect()
     for t in ("recon_result", "recon_batch", "hist_price", "price_index", "import_batch"):
         conn.execute("DELETE FROM " + t)
+    conn.commit()
+    rebuild_supplier_history(ref="清空历史库", conn=conn)
     conn.commit()
     conn.execute("VACUUM")
     conn.close()

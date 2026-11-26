@@ -104,6 +104,17 @@ input[type=month]{ padding:8px 10px; border:1px solid var(--line); border-radius
 .gap-down{ color:var(--green); font-weight:600; }
 .difftag{ display:inline-block; padding:1px 7px; margin:1px 3px 1px 0; border-radius:9px;
   background:#f2f5fa; color:#455; font-size:11px; white-space:nowrap; }
+/* 供应商历史台账：状态标记 */
+.sh-status{ display:inline-block; padding:1px 8px; border-radius:9px; font-size:11px; white-space:nowrap; }
+.sh-new{ background:var(--green-bg); color:var(--green); }
+.sh-changed{ background:#fff4e5; color:var(--orange); }
+.sh-steady{ background:#f2f5fa; color:var(--muted); }
+.sh-expired{ background:var(--red-bg); color:var(--red); }
+.sh-row-expired td{ color:var(--muted); }
+.ev{ display:flex; gap:10px; padding:7px 10px; border-bottom:1px solid #eef1f5; font-size:12.5px; }
+.ev:last-child{ border-bottom:none; }
+.ev .t{ color:var(--muted); white-space:nowrap; }
+.ev .k{ font-weight:600; white-space:nowrap; }
 
 .toast{ position:fixed; bottom:28px; left:50%; transform:translateX(-50%) translateY(120px);
   background:#1f2733; color:#fff; padding:12px 22px; border-radius:10px; font-size:13px;

@@ -63,6 +63,27 @@
     </div>
     <div class="card">
       <div class="card-head">
+        <div><h2>供应商历史有效数据</h2>
+          <p class="muted">按「供应商 × 期间」保存历史有效数据：数据时间、来源、状态变化与关键指标。数据新增/变更/失效后自动刷新，同一期间不会重复写入，无效或失效期间不计入有效记录。</p></div>
+        <div class="head-actions">
+          <button class="btn ghost small" id="btnSupHistRebuild" style="display:none">重建台账</button>
+        </div>
+      </div>
+      <div class="form-row">
+        <label>供应商</label>
+        <select id="shSupplier"><option value="">全部供应商</option></select>
+        <label>月份</label>
+        <input type="month" id="shFrom"> <span class="muted">至</span>
+        <input type="month" id="shTo">
+        <label class="chk"><input type="checkbox" id="shHideExpired"> 只看有效（隐藏已失效期间）</label>
+        <button class="btn ghost small" id="btnShQuery">查询</button>
+      </div>
+      <div class="statcards" id="shStats"></div>
+      <div class="tablewrap" id="shTable"><div class="empty">加载中…</div></div>
+      <div class="report" id="shEvents"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">
         <div><h2>账单备份导出</h2>
           <p class="muted">按账单类型、供应商、月份范围筛选后打包下载。分表为标准录入模板格式，解压后可直接从本页重新上传恢复；随包附「备份清单」(CSV/JSON) 与「恢复说明」。</p></div>
       </div>

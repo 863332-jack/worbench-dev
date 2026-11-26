@@ -374,6 +374,49 @@ def main():
           len(got) == 4 and [g[1] for g in got] == [10.0, 10.0, 20.0, 10.0], str(got))
     check("数量/合计金额未被合并丢失", all(g[2] == g[1] * 5 for g in got), str(got))
 
+    print("== 16. 供应商历史有效数据台账（按供应商×期间） ==")
+    r = s.get(BASE + "/api/suppliers/history", timeout=20).json()
+    check("台账接口可用且有期间记录", r.get("ok") is True and len(r.get("rows", [])) >= 3,
+          str(r)[:160])
+    check("快照含时间/来源/状态/关键指标",
+          all(k in r["rows"][0] for k in ("period", "rows_total", "rows_valid", "models",
+                                          "min_price", "avg_price", "amount_total", "files",
+                                          "status", "updated_at")), str(r["rows"][0])[:200])
+    check("有效期间只统计有效明细（合计>0）",
+          r["summary"]["rows_valid"] > 0 and r["summary"]["periods"] == len(
+              [x for x in r["rows"] if x["rows_valid"] > 0]), str(r["summary"]))
+
+    r2 = s.get(BASE + "/api/suppliers/history?supplier=%E6%9D%B0%E7%9B%9B"
+                      "&month_from=2027-01&month_to=2027-01", timeout=20).json()
+    check("按供应商 + 月份范围查询生效",
+          len(r2["rows"]) == 1 and r2["rows"][0]["supplier"] == "杰盛"
+          and r2["rows"][0]["period"] == "2027-01", str(r2["rows"])[:200])
+
+    sh_add = make_xlsx(os.path.join(TMP, "sh_add.xlsx"),
+                       [["杰盛", "2027-01-20", "SH-NEW", "", "铜", 3, 9, 27, ""]])
+    s.post(BASE + "/api/history/upload", files={"files": open(sh_add, "rb")}, timeout=30)
+    r3 = s.get(BASE + "/api/suppliers/history?supplier=%E6%9D%B0%E7%9B%9B"
+                      "&month_from=2027-01&month_to=2027-01", timeout=20).json()
+    row = r3["rows"][0]
+    check("新增数据后期间状态转为「变更」并给出差异",
+          row["status"] == "changed" and "+1" in (row["change_note"] or ""), str(row)[:240])
+    ev = s.get(BASE + "/api/suppliers/history?supplier=%E6%9D%B0%E7%9B%9B", timeout=20).json()["events"]
+    check("状态变化已记入事件流",
+          any(e["event"] in ("new", "changed") for e in ev), str(ev[:2])[:200])
+
+    ev_before = len(ev)
+    s.post(BASE + "/api/history/upload", files={"files": open(sh_add, "rb")}, timeout=30)
+    ev_after = len(s.get(BASE + "/api/suppliers/history?supplier=%E6%9D%B0%E7%9B%9B",
+                         timeout=20).json()["events"])
+    check("重复导入不重复写台账/事件", ev_after == ev_before, "%d → %d" % (ev_before, ev_after))
+
+    s.post(BASE + "/api/auth/login", json={"password": "13662566518"}, timeout=10)
+    s.post(BASE + "/api/history/reset", timeout=30)
+    r4 = s.get(BASE + "/api/suppliers/history", timeout=20).json()
+    check("清空后各期间转「失效」且不计入有效记录",
+          r4["summary"]["periods"] == 0 and r4["summary"]["rows_valid"] == 0
+          and all(x["rows_valid"] == 0 for x in r4["rows"]), str(r4["summary"]))
+
     print()
     print("=" * 48)
     print("冒烟测试结果：通过 %d 项 / 失败 %d 项" % (PASS, FAIL))

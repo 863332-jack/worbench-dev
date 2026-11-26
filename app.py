@@ -96,6 +96,14 @@ try:
 except Exception:
     log.exception("去重口径升级失败（不影响启动，但可能与旧口径数据重复）")
 
+# 供应商历史有效数据台账：启动时对齐一次（幂等，指标未变的期间不会被改写、也不产生事件）
+try:
+    _h = db.rebuild_supplier_history(ref="初始化")
+    if _h["changed"]:
+        log.info("供应商历史台账初始化：%d 个供应商期间，新增事件 %d 条", _h["changed"], _h["events"])
+except Exception:
+    log.exception("供应商历史台账初始化失败（不影响启动，页面会在下次写入后刷新）")
+
 # ---------- 管理员登录失败锁定（内存计数，重启清零） ----------
 _login_fail = {"count": 0, "until": 0.0}
 
@@ -350,6 +358,57 @@ def api_supplier_delete(sid):
     log.info("删除供应商：%s", name)
     return jsonify(ok=True, suppliers=db.list_suppliers(with_usage=True),
                    msg="供应商「%s」已删除" % name)
+
+
+@app.route("/api/suppliers/history")
+def api_supplier_history():
+    """供应商历史有效数据：按供应商 + 月份范围查询（含状态、来源、指标与最近变化）。"""
+    supplier = (request.args.get("supplier") or "").strip()
+    month_from = (request.args.get("month_from") or "").strip()
+    month_to = (request.args.get("month_to") or "").strip()
+    include_expired = (request.args.get("include_expired") or "1") != "0"
+    for m in (month_from, month_to):
+        if m and not re.match(r"^\d{4}-\d{2}$", m):
+            return jsonify(ok=False, error="月份格式应为 YYYY-MM（如 2026-07）"), 400
+    if month_from and month_to and month_from > month_to:
+        return jsonify(ok=False, error="起始月份不能晚于结束月份"), 400
+    try:
+        rows, models = db.list_supplier_history(supplier, month_from, month_to, include_expired)
+        events = db.list_supplier_events(supplier or None, limit=40)
+    except Exception as e:
+        log.exception("供应商历史查询失败")
+        return jsonify(ok=False, error="查询失败：%s" % e), 500
+
+    # 汇总只统计有效期间（rows_valid>0），失效期间不计入有效记录
+    valid = [r for r in rows if (r.get("rows_valid") or 0) > 0]
+    prices = [r["min_price"] for r in valid if r.get("min_price") is not None]
+    summary = {
+        "periods": len(valid),
+        "periods_expired": len(rows) - len(valid),
+        "rows_valid": sum(r["rows_valid"] or 0 for r in valid),
+        "models": models,
+        "amount_total": round(sum(r["amount_total"] or 0 for r in valid), 2),
+        "min_price": min(prices) if prices else None,
+        "last_period": valid[-1]["period"] if valid else "",
+        "updated_at": max([r["updated_at"] or "" for r in rows], default=""),
+        "suppliers": sorted({r["supplier"] for r in valid}),
+    }
+    return jsonify(ok=True, rows=rows, events=events, summary=summary,
+                   labels=db.SUP_HIST_LABELS)
+
+
+@app.route("/api/suppliers/history/rebuild", methods=["POST"])
+def api_supplier_history_rebuild():
+    """手动重建台账（管理员，用于修复或口径调整后重算）。"""
+    if not is_admin_session():
+        return jsonify(ok=False, error="需要管理员权限才能重建供应商历史台账"), 403
+    try:
+        r = db.rebuild_supplier_history(ref="手动重建")
+    except Exception as e:
+        log.exception("供应商历史台账重建失败")
+        return jsonify(ok=False, error="重建失败：%s" % e), 500
+    return jsonify(ok=True, changed=r["changed"], events=r["events"],
+                   msg="台账已重建：更新 %d 个供应商期间，新增状态变化 %d 条" % (r["changed"], r["events"]))
 
 
 # ---------- 账单备份：按条件筛选 → 打包下载（可归档、可回灌） ----------
