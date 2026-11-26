@@ -22,7 +22,7 @@ import time
 import requests
 from openpyxl import Workbook
 
-BASE = "http://127.0.0.1:5088"
+BASE = os.environ.get("SMOKE_BASE", "http://127.0.0.1:5088")   # 可指向临时实例
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TMP = os.path.join(ROOT, "scripts", ".smoke_tmp")
 HEADERS_STAR = ["供应商 *", "日期 *", "型号 *", "尺寸", "材质", "数量", "单价 *", "合计金额", "备注"]
@@ -59,16 +59,16 @@ def make_xlsx(path, rows, sheet="Sheet1", extra_sheets=None):
 def guard_live_data():
     """安全闸门：冒烟测试会导入并**清空**历史库、删除测试订单。
 
-    2026-11-26 起系统已在局域网实际使用（真实订单/历史数据可能已存在），
+    2026-11-26 起系统已在局域网实际使用（真实历史/核对数据可能已存在），
     因此默认拒绝在有任何业务数据时运行；确需运行时显式设置 SMOKE_FORCE=1。
     """
     import sqlite3
-    db_path = os.path.join(ROOT, "data", "recon.db")
+    db_path = os.environ.get("SMOKE_DB_PATH") or os.path.join(ROOT, "data", "recon.db")
     if not os.path.exists(db_path):
         return
     conn = sqlite3.connect(db_path)
     busy = {}
-    for t in ("hist_price", "recon_batch", "po_order"):
+    for t in ("hist_price", "recon_batch", "recon_result"):
         try:
             busy[t] = conn.execute("SELECT COUNT(*) FROM " + t).fetchone()[0]
         except sqlite3.Error:
@@ -77,7 +77,7 @@ def guard_live_data():
     if any(v for v in busy.values()) and os.environ.get("SMOKE_FORCE") != "1":
         print("=" * 60)
         print("已中止：数据库中存在业务数据 %s" % busy)
-        print("冒烟测试会导入并清空历史库、删除测试订单，为避免破坏真实数据默认不执行。")
+        print("冒烟测试会导入并清空历史库，为避免破坏真实数据默认不执行。")
         print("确认可以清空时：先备份 data/recon.db，再用 SMOKE_FORCE=1 重新运行。")
         print("=" * 60)
         raise SystemExit(2)
@@ -182,7 +182,8 @@ def main():
 
     print("== 9. 数量/合计金额入库（B-1） ==")
     import sqlite3
-    conn = sqlite3.connect(os.path.join(ROOT, "data", "recon.db"))
+    conn = sqlite3.connect(os.environ.get("SMOKE_DB_PATH")
+                            or os.path.join(ROOT, "data", "recon.db"))
     row = conn.execute(
         "SELECT quantity, total_amount, bill_date, remark FROM hist_price WHERE model='J55' LIMIT 1"
     ).fetchone()
