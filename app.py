@@ -711,16 +711,22 @@ if __name__ == "__main__":
         def _if_ip(name):
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             try:
-                # macOS SIOCGIFADDR
-                r = fcntl.ioctl(s.fileno(), 0xC0206921,
-                                struct.pack("256s", name[:15].encode()))
-                return socket.inet_ntoa(r[20:24])
-            except Exception:
+                # SIOCGIFADDR 的常量各平台不同：
+                #   macOS 0xC0206921 / Linux 0x8915
+                # 容器（Linux）里必须用后者，否则整个枚举都会失败、
+                # 退化到兜底探测拿到 172.17.x.x 这种宿主机不可达的地址。
+                buf = struct.pack("256s", name[:15].encode())
+                for req in (0xC0206921, 0x8915):
+                    try:
+                        r = fcntl.ioctl(s.fileno(), req, buf)
+                        return socket.inet_ntoa(r[20:24])
+                    except Exception:
+                        continue
                 return None
             finally:
                 s.close()
 
-        bad_prefix = ("127.", "169.254.", "198.18.", "198.19.", "0.")
+        bad_prefix = ("127.", "169.254.", "198.18.", "198.19.", "0.", "172.17.")
         skip_if = ("lo", "utun", "gif", "stf", "bridge", "awdl", "llw", "anpi", "nan")
 
         try:
@@ -749,11 +755,23 @@ if __name__ == "__main__":
 
     housekeeping()
     ip = lan_ip()
-    print("=" * 56)
-    print("账单核对系统已启动（监听 0.0.0.0:5088，支持局域网访问）")
-    print("  本机访问:    http://127.0.0.1:5088")
-    print("  局域网访问:  http://%s:5088" % ip)
+    # 容器里拿到的永远是 docker 内部地址，打印出来只会误导人
+    in_docker = os.path.exists("/.dockerenv")
+    print("=" * 60)
+    print("账单核对系统已启动（监听 0.0.0.0:5088）")
+    if in_docker:
+        print("  运行环境:    Docker 容器")
+        print("  访问方式:    http://NAS的IP:映射端口（如 http://192.168.8.10:5088）")
+    else:
+        print("  本机访问:    http://127.0.0.1:5088")
+        print("  局域网访问:  http://%s:5088" % ip)
     print("  日志文件:    logs/app.log")
     print("  自动备份:    data/backups/（清空历史库前自动备份）")
-    print("=" * 56)
+    if not config.ADMIN_PASSWORD_FROM_ENV:
+        print("  " + "-" * 56)
+        print("  ⚠ 安全提示：未设置环境变量 RECON_ADMIN_PASSWORD，")
+        print("     正在使用代码内置的默认管理员密码。该密码已随公开仓库暴露，")
+        print("     任何能看到此服务的人都能用它清空数据库。")
+        print("     请尽快用环境变量注入新密码（见 NAS-Docker部署指南.md）。")
+    print("=" * 60)
     app.run(host="0.0.0.0", port=5088, debug=False, threaded=True)

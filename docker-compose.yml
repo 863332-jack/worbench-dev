@@ -1,0 +1,49 @@
+# 账单核对系统 · 群晖 DSM 7.x 部署编排
+#
+# 目录结构（/volume1/docker/recon 下）：
+#   docker-compose.yml     ← 本文件
+#   .env                   ← 管理员密码（不要提交到 git）
+#   app/                   ← 项目源码（含 Dockerfile）
+#   storage/data|uploads|outputs|logs/   ← 持久化数据（容器重建不丢）
+#
+# 用法：群晖 Container Manager → 项目 → 新增 → 选择 /volume1/docker/recon → 使用现有 docker-compose.yml
+
+services:
+  recon:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: recon-system:1.0.0
+    container_name: recon-system
+    restart: unless-stopped
+    # 千万保持单副本：SQLite 以 WAL 模式运行，多个容器同时挂同一个库会锁冲突
+    ports:
+      - "5088:5088"
+    environment:
+      TZ: Asia/Shanghai
+      # 管理员密码从 .env 读取；留空则回退到代码内置默认值（不推荐）
+      RECON_ADMIN_PASSWORD: ${RECON_ADMIN_PASSWORD:-}
+    volumes:
+      # 数据库（recon.db + backups/）
+      - ./storage/data:/app/data
+      # 上传的历史账单与待核对账单原件
+      - ./storage/uploads:/app/uploads
+      # 核对结果 Excel 与备份 ZIP
+      - ./storage/outputs:/app/outputs
+      # 运行日志（排障第一现场）
+      - ./storage/logs:/app/logs
+    # 如需以非 root 运行（更安全，但要求宿主机目录属主匹配），取消下一行注释。
+    # 群晖 admin 账号通常是 1026:100，用 `id admin` 在 NAS 终端可确认。
+    # user: "1026:100"
+    logging:
+      driver: json-file
+      options:
+        # 不限制的话容器日志会把 NAS 磁盘写满
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5088/api/status', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3

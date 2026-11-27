@@ -14,8 +14,13 @@ for d in (DATA_DIR, UPLOAD_DIR, OUTPUT_DIR, LOG_DIR, BACKUP_DIR):
     os.makedirs(d, exist_ok=True)
 
 # ---------- 安全配置（集中管理，避免多处硬编码漂移） ----------
-# 管理员密码：清空历史库 / 历史记录删除共用（原 app.py 与 hist_db.py 两处硬编码，已收敛至此）
-ADMIN_PASSWORD = "13662566518"
+# 管理员密码：清空历史库 / 历史记录删除 / 账单导出备份共用。
+# 优先读环境变量 RECON_ADMIN_PASSWORD —— 容器部署必须用这个方式注入，
+# 不要把真实密码写进代码或 docker-compose.yml。
+# 下面的内置值只是本机开发的兜底，且已于公开仓库暴露，生产环境务必覆盖。
+ADMIN_PASSWORD = os.environ.get("RECON_ADMIN_PASSWORD") or "13662566518"
+# 是否成功从环境变量取到密码（启动时据此提示风险）
+ADMIN_PASSWORD_FROM_ENV = bool(os.environ.get("RECON_ADMIN_PASSWORD"))
 # 管理员登录失败锁定：连续失败 N 次后锁定 M 秒
 LOGIN_LOCK_AFTER = 5
 LOGIN_LOCK_SECONDS = 600

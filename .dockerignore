@@ -1,0 +1,26 @@
+# 这些是本机运行数据，绝不能打进镜像
+# （否则镜像里会带着真实供应商价格、上传的原始账单和导出文件）
+data/
+uploads/
+outputs/
+logs/
+
+# 会清空数据库的冒烟脚本，不进生产镜像，避免误执行
+scripts/
+tests/
+
+# 本机启动脚本（macOS 专用，容器里用不到）
+启动服务.command
+
+# 开发/构建产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.DS_Store
+.git/
+.gitignore
+docker-compose.yml
+.env
+.env.*
+*.md

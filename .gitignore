@@ -5,3 +5,7 @@ logs/
 __pycache__/
 *.pyc
 scripts/.smoke_tmp/
+
+# 容器部署：密码等敏感配置只存在于 NAS 上，绝不入库
+.env
+storage/
