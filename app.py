@@ -438,14 +438,17 @@ def api_supplier_history():
     supplier = (request.args.get("supplier") or "").strip()
     month_from = (request.args.get("month_from") or "").strip()
     month_to = (request.args.get("month_to") or "").strip()
+    model = (request.args.get("model") or "").strip()
     include_expired = (request.args.get("include_expired") or "1") != "0"
+    if len(model) > 60:
+        return jsonify(ok=False, error="型号关键字最长 60 个字符"), 400
     for m in (month_from, month_to):
         if m and not re.match(r"^\d{4}-\d{2}$", m):
             return jsonify(ok=False, error="月份格式应为 YYYY-MM（如 2026-07）"), 400
     if month_from and month_to and month_from > month_to:
         return jsonify(ok=False, error="起始月份不能晚于结束月份"), 400
     try:
-        rows, models = db.list_supplier_history(supplier, month_from, month_to, include_expired)
+        rows, models = db.list_supplier_history(supplier, month_from, month_to, include_expired, model)
         events = db.list_supplier_events(supplier or None, limit=40)
     except Exception as e:
         log.exception("供应商历史查询失败")
@@ -464,6 +467,9 @@ def api_supplier_history():
         "last_period": valid[-1]["period"] if valid else "",
         "updated_at": max([r["updated_at"] or "" for r in rows], default=""),
         "suppliers": sorted({r["supplier"] for r in valid}),
+        # 型号关键字查询：filter_model 为空表示未筛选（前端据此决定是否加「命中型号」列）
+        "filter_model": model,
+        "hit_rows": sum(r.get("rows_hit") or 0 for r in rows),
     }
     return jsonify(ok=True, rows=rows, events=events, summary=summary,
                    labels=db.SUP_HIST_LABELS)

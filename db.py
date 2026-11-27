@@ -506,8 +506,58 @@ def rebuild_supplier_history(ref="", conn=None):
             conn.close()
 
 
-def list_supplier_history(supplier=None, month_from="", month_to="", include_expired=True):
-    """按供应商 + 月份范围查询历史有效数据（含状态、来源、指标）。"""
+def _like_escape(s):
+    """转义 LIKE 通配符：型号里带 % _ \\ 时不至于把关键字当通配符用。"""
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _model_hit_map(conn, keyword, supplier=None, month_from="", month_to=""):
+    """型号关键字（包含匹配）→ 命中的「供应商 × 期间」及其命中型号。
+
+    匹配口径：
+    - 用 normalize_model() 归一化关键字，再对 hist_price.model_norm 做包含匹配，
+      所以大小写、全半角、空格、直径符号差异都不影响命中；
+    - 只统计**有效价明细**（VALID_COND），与「供应商历史有效数据」的有效口径一致；
+    - 返回 (hits, model_total)：hits = {(supplier, period): {"models": [(型号, 条数)], "rows": n}}。
+    """
+    from parsers import normalize_model   # 延迟导入：入库与查询共用同一归一化函数
+    kw = normalize_model(keyword)
+    if not kw:
+        return {}, 0
+    where = ["model_norm LIKE ? ESCAPE '\\'", "(%s)" % VALID_COND]
+    args = ["%" + _like_escape(kw) + "%"]
+    if supplier:
+        where.append("supplier=?")
+        args.append(supplier)
+    if month_from:
+        where.append("COALESCE(NULLIF(period,''),'未标月份')>=?")
+        args.append(month_from)
+    if month_to:
+        where.append("COALESCE(NULLIF(period,''),'未标月份')<=?")
+        args.append(month_to)
+    rows = conn.execute(
+        """SELECT supplier,
+                  COALESCE(NULLIF(period,''),'未标月份') AS period,
+                  model_norm, MIN(model) AS model, COUNT(*) AS hits
+           FROM hist_price WHERE %s
+           GROUP BY supplier, period, model_norm
+           ORDER BY supplier, period, model_norm""" % " AND ".join(where), args).fetchall()
+    hits = {}
+    for r in rows:
+        key = (r["supplier"], r["period"])
+        h = hits.setdefault(key, {"models": [], "rows": 0})
+        h["models"].append((r["model"], r["hits"]))
+        h["rows"] += r["hits"]
+    return hits, len({r["model_norm"] for r in rows})
+
+
+def list_supplier_history(supplier=None, month_from="", month_to="", include_expired=True, model=""):
+    """按供应商 + 月份范围 + 型号关键字查询历史有效数据（含状态、来源、指标）。
+
+    model 非空时：只保留「含该型号（包含匹配）」的期间，并在每行附带
+    models_hit（命中型号数）/ rows_hit（命中明细条数）/ model_names（命中型号名，最多 6 个），
+    第二个返回值改为「命中型号总数」。整个查询只读，不写库、不产生事件。
+    """
     sql = "SELECT * FROM supplier_history WHERE 1=1"
     args = []
     if supplier:
@@ -526,6 +576,20 @@ def list_supplier_history(supplier=None, month_from="", month_to="", include_exp
     conn = connect()
     try:
         rows = [dict(r) for r in conn.execute(sql, args)]
+        if model:
+            # 型号关键字筛选：按命中期间裁剪台账行，并把命中详情挂到行上供前端展示
+            hits, hit_models = _model_hit_map(conn, model, supplier, month_from, month_to)
+            kept = []
+            for r in rows:
+                h = hits.get((r["supplier"], r["period"]))
+                if not h:
+                    continue
+                r["models_hit"] = len(h["models"])
+                r["rows_hit"] = h["rows"]
+                r["model_names"] = "、".join(m for m, _n in h["models"][:6])
+                kept.append(r)
+            rows = kept
+            return rows, hit_models       # 型号数按命中口径返回（跨期去重）
         # 期间数量/型号总数按实际数据口径补全（型号跨期去重）
         where, wargs = [], []
         if supplier:

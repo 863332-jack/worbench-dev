@@ -41,7 +41,7 @@ def _env_int(name, default):
 
 # 版本号：会出现在 /api/status 与启动横幅里。
 # 用途：改完代码重建镜像后，用它确认 NAS 上跑的确实是新版本（避免"以为改了其实没生效"）。
-APP_VERSION = os.environ.get("RECON_VERSION", "1.2.0")
+APP_VERSION = os.environ.get("RECON_VERSION", "1.3.0")
 
 # 上传原件/导出结果保留天数（启动时 + 每日维护时清理）
 UPLOAD_RETENTION_DAYS = _env_int("RECON_RETENTION_DAYS", 90)

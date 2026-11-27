@@ -517,6 +517,37 @@ def main():
           len(r2["rows"]) == 1 and r2["rows"][0]["supplier"] == "杰盛"
           and r2["rows"][0]["period"] == "2027-01", str(r2["rows"])[:200])
 
+    # --- 16b. 型号手动查询：包含匹配 + 与其它条件叠加 + 全程只读 ---
+    ev_before_q = len(s.get(BASE + "/api/suppliers/history", timeout=20).json()["events"])
+    rq = s.get(BASE + "/api/suppliers/history?model=DET-1", timeout=20).json()
+    check("型号查询：只返回含该型号的期间，并给出命中型号/明细数",
+          rq.get("ok") is True and len(rq["rows"]) >= 1
+          and all(x.get("rows_hit", 0) >= 1 and x.get("models_hit", 0) >= 1
+                  and "DET-1" in (x.get("model_names") or "") for x in rq["rows"]),
+          str(rq.get("summary"))[:200])
+    check("型号查询：summary 回显关键字，型号数按命中口径统计",
+          rq["summary"]["filter_model"] == "DET-1" and rq["summary"]["models"] >= 1
+          and rq["summary"]["hit_rows"] >= 1, str(rq["summary"])[:200])
+    rq2 = s.get(BASE + "/api/suppliers/history?model=det-", timeout=20).json()
+    check("型号查询：包含匹配且忽略大小写（det- 命中 DET-1）",
+          len(rq2["rows"]) == len(rq["rows"]), "%d vs %d" % (len(rq2["rows"]), len(rq["rows"])))
+    rq3 = s.get(BASE + "/api/suppliers/history?model=%E4%B8%8D%E5%AD%98%E5%9C%A8ZZZ",
+                timeout=20).json()
+    check("型号查询：无匹配返回空表且不报错（不等于回退全量）",
+          rq3.get("ok") is True and rq3["rows"] == [] and rq3["summary"]["models"] == 0,
+          str(rq3.get("summary"))[:160])
+    rq4 = s.get(BASE + "/api/suppliers/history?model=DET-1&supplier=%E4%BA%91%E9%94%A6",
+                timeout=20).json()
+    check("型号查询：与供应商条件叠加生效",
+          len(rq4["rows"]) >= 1 and all(x["supplier"] == "云锦" for x in rq4["rows"]),
+          str([(x["supplier"], x["period"]) for x in rq4["rows"]])[:200])
+    rq5 = s.get(BASE + "/api/suppliers/history?model=%25", timeout=20).json()
+    check("型号查询：通配符被转义（% 不当通配符用，不返回全量）",
+          rq5.get("ok") is True and rq5["rows"] == [], str(len(rq5.get("rows", []))))
+    ev_after_q = len(s.get(BASE + "/api/suppliers/history", timeout=20).json()["events"])
+    check("型号查询全程只读：不写库、不产生查询记录/事件",
+          ev_after_q == ev_before_q, "事件 %d → %d" % (ev_before_q, ev_after_q))
+
     sh_add = make_xlsx(os.path.join(TMP, "sh_add.xlsx"),
                        [["杰盛", "2027-01-20", "SH-NEW", "", "铜", 3, 9, 27, ""]])
     s.post(BASE + "/api/history/upload", files={"files": open(sh_add, "rb")}, timeout=30)

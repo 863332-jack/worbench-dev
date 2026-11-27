@@ -7,7 +7,8 @@
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 let state = { histFiles: [], rcFiles: [], currentRecon: '', currentStatus: '', currentDiff: '',
-              isAdmin: false, suppliers: [], supOpener: '', tab: 'history', resultPage: 1 };
+              isAdmin: false, suppliers: [], supOpener: '', tab: 'history', resultPage: 1,
+              shModel: '' };   // 型号查询关键字（仅内存，不落库、不写 sessionStorage）
 
 const BTN_HIST_TEXT = '上传并校验（追加）';
 const BTN_RC_TEXT = '开始核对';
@@ -531,6 +532,10 @@ async function loadSupplierHistory(){
   if($('#shFrom').value) p.set('month_from',$('#shFrom').value);
   if($('#shTo').value) p.set('month_to',$('#shTo').value);
   if($('#shHideExpired').checked) p.set('include_expired','0');
+  // 型号关键字：与上面的供应商/月份条件同时生效；为空则不带该参数（恢复全部）
+  const kw=shModelValue();
+  if(kw) p.set('model',kw);
+  state.shModel=kw;
   try{
     const resp=await fetch('/api/suppliers/history?'+p.toString());
     if(resp.status===403){ ledgerForbidden(); return; }
@@ -542,6 +547,8 @@ async function loadSupplierHistory(){
 
 function renderSupplierHistory(r){
   const s=r.summary||{}, rows=r.rows||[], events=r.events||[];
+  const kw=s.filter_model||'';
+  renderShModelHint(kw, s, rows);
   const cnt=$('#foldSupHistCount');
   if(cnt) cnt.textContent = s.periods
     ? `${s.periods} 个有效期间 · ${s.rows_valid||0} 条有效明细`
@@ -550,7 +557,8 @@ function renderSupplierHistory(r){
     <div class="stat"><div class="n">${s.periods||0}</div><div class="l">有效期间数</div>
       <div class="hint">覆盖：${esc((s.suppliers||[]).join('、')||'—')}</div></div>
     <div class="stat"><div class="n">${s.rows_valid||0}</div><div class="l">有效明细条数</div>
-      <div class="hint">已排除空价/待核价与失效期间${s.periods_expired?('；失效期间 '+s.periods_expired+' 个'):''}</div></div>
+      <div class="hint">${kw?('命中型号 '+(s.hit_rows||0)+' 条，其余为同期间其它型号')
+        :('已排除空价/待核价与失效期间'+(s.periods_expired?('；失效期间 '+s.periods_expired+' 个'):''))}</div></div>
     <div class="stat"><div class="n">${s.models||0}</div><div class="l">型号数</div>
       <div class="hint">跨期去重</div></div>
     <div class="stat"><div class="n">${money(s.amount_total)}</div><div class="l">金额合计</div>
@@ -558,15 +566,26 @@ function renderSupplierHistory(r){
 
   const box=$('#shTable');
   if(!rows.length){
-    box.innerHTML='<div class="empty">当前条件下没有历史记录，请放宽供应商/月份范围，或先导入历史账单</div>';
+    box.innerHTML = kw
+      ? `<div class="empty">没有型号包含「${esc(kw)}」的历史记录，请换个关键字，或先清空型号查询看全部数据</div>`
+      : '<div class="empty">当前条件下没有历史记录，请放宽供应商/月份范围，或先导入历史账单</div>';
   } else {
     let h='<table><thead><tr><th>供应商</th><th>期间</th><th>状态</th><th>明细条数</th><th>有效明细</th>'+
-          '<th>型号数</th><th>最低单价</th><th>均价</th><th>金额合计</th><th>数据日期范围</th><th>来源文件</th><th>更新时间</th></tr></thead><tbody>';
+          '<th>型号数</th>'+(kw?'<th>命中型号</th>':'')+'<th>最低单价</th><th>均价</th><th>金额合计</th><th>数据日期范围</th><th>来源文件</th><th>更新时间</th></tr></thead><tbody>';
     rows.forEach(x=>{
       const expired = !(x.rows_valid>0);
-      h+=`<tr class="${expired?'sh-row-expired':''}"><td><b>${esc(x.supplier)}</b></td><td>${esc(x.period)}</td>
-        <td>${shStatusTag(x.status)}</td><td>${x.rows_total||0}</td><td>${x.rows_valid||0}</td><td>${x.models||0}</td>
-        <td>${money(x.min_price)}</td><td>${x.avg_price===null||x.avg_price===undefined?'—':Number(x.avg_price).toFixed(2)}</td>
+      // 命中型号：首行给数量，次行给前两个型号名（完整清单放 title，避免单元格被撑宽）
+      let hitCell='';
+      if(kw){
+        const names=String(x.model_names||'').split('、').filter(Boolean);
+        const brief=names.slice(0,2).join('、')+(names.length>2?'…':'');
+        hitCell=`<td class="sh-hit" title="${esc(x.model_names||'')}"><b>${x.models_hit||0}</b> 个`
+          +(brief?`<span class="sh-hit-names">${esc(brief)}</span>`:'')+'</td>';
+      }
+      h+=`<tr class="${expired?'sh-row-expired':''}"><td><b>${esc(x.supplier)}</b></td><td class="sh-period">${esc(x.period)}</td>
+        <td>${shStatusTag(x.status)}</td><td>${x.rows_total||0}</td><td>${x.rows_valid||0}</td><td>${x.models||0}</td>`
+        +hitCell
+        +`<td>${money(x.min_price)}</td><td>${x.avg_price===null||x.avg_price===undefined?'—':Number(x.avg_price).toFixed(2)}</td>
         <td>${money(x.amount_total)}</td>
         <td>${esc(x.first_date||'—')} ~ ${esc(x.last_date||'—')}</td>
         <td>${esc(x.files||'—')}</td><td>${esc(x.updated_at||'—')}</td></tr>`;
@@ -590,6 +609,50 @@ function renderSupplierHistory(r){
   evBox.innerHTML=eh+'</div>';
 }
 
+// ===== 型号手动查询（主页面台账）=====
+// 只做「前端触发 + 只读查询」：不写库、不产生任何查询记录（localStorage/sessionStorage 一律不用），
+// 关键字只存在于输入框与内存 state.shModel 中，刷新页面即消失。
+let shModelTimer=null;
+
+function shModelValue(){
+  const el=$('#shModel');
+  return el ? (el.value||'').trim() : '';
+}
+
+// 搜索时立即折叠「历史记录」区域：只动这一块折叠区，
+// 「供应商历史有效数据」整块的展开状态与其它折叠区都不受影响。
+function collapseShEvents(){
+  const ev=document.getElementById('foldEvents');
+  if(ev && ev.open) ev.open=false;
+}
+
+// 生效提示条：明确当前筛选口径与命中量，并提供一键清空
+function renderShModelHint(kw, s, rows){
+  const box=$('#shModelHint');
+  if(!box) return;
+  if(!kw){ box.hidden=true; box.innerHTML=''; return; }
+  box.hidden=false;
+  box.innerHTML=`型号包含「<span class="kw">${esc(kw)}</span>」 · 命中 ${rows.length} 个期间 / ${s.hit_rows||0} 条有效明细 / ${s.models||0} 个型号`
+    +'<button class="btn ghost small" id="btnShModelClear">清空型号筛选</button>';
+  const b=$('#btnShModelClear');
+  if(b) b.addEventListener('click',()=>clearShModel());
+}
+
+function clearShModel(){
+  if(shModelTimer){ clearTimeout(shModelTimer); shModelTimer=null; }
+  const el=$('#shModel');
+  if(el) el.value='';
+  state.shModel='';
+  loadSupplierHistory();                 // 关键字为空 → 恢复正常数据展示
+}
+
+function applyShModel(force){
+  const kw=shModelValue();
+  if(kw) collapseShEvents();             // 有关键字：立刻折叠历史记录区域
+  if(!force && kw===state.shModel) return;   // 关键字没变就不重复请求
+  loadSupplierHistory();                 // loadSupplierHistory 会同步 state.shModel
+}
+
 function renderShSupplierSelect(){
   const el=$('#shSupplier'); if(!el) return;
   const cur=el.value;
@@ -605,6 +668,31 @@ if(btnShQuery) btnShQuery.addEventListener('click',loadSupplierHistory);
 ['#shSupplier','#shFrom','#shTo','#shHideExpired'].forEach(sel=>{
   const el=$(sel);
   if(el) el.addEventListener('change',loadSupplierHistory);
+});
+
+// 型号查询：输入即筛选（防抖 260ms）+ 回车立即查 + 点「查询」立即查 + Esc 清空
+const shModelInput=$('#shModel');
+if(shModelInput){
+  shModelInput.addEventListener('input',()=>{
+    if(shModelInput.value.trim()) collapseShEvents();
+    if(shModelTimer) clearTimeout(shModelTimer);
+    shModelTimer=setTimeout(()=>{ shModelTimer=null; applyShModel(false); },260);
+  });
+  shModelInput.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){
+      e.preventDefault();
+      if(shModelTimer){ clearTimeout(shModelTimer); shModelTimer=null; }
+      applyShModel(true);
+    } else if(e.key==='Escape'){
+      e.preventDefault();
+      clearShModel();
+    }
+  });
+}
+const btnShModelQuery=$('#btnShModelQuery');
+if(btnShModelQuery) btnShModelQuery.addEventListener('click',()=>{
+  if(shModelTimer){ clearTimeout(shModelTimer); shModelTimer=null; }
+  applyShModel(true);
 });
 const btnSupHistRebuild=$('#btnSupHistRebuild');
 if(btnSupHistRebuild) btnSupHistRebuild.addEventListener('click',async(ev)=>{

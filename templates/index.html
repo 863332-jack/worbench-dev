@@ -96,6 +96,15 @@
             <label class="chk"><input type="checkbox" id="shHideExpired"> 只看有效（隐藏已失效期间）</label>
             <button class="btn ghost small" id="btnShQuery">查询</button>
           </div>
+          <!-- 型号手动查询：输入即筛选（防抖），回车/点「查询」立即生效，清空恢复全部 -->
+          <div class="form-row">
+            <label>型号查询</label>
+            <input type="text" id="shModel" class="sh-model-input" maxlength="60"
+                   autocomplete="off" spellcheck="false" placeholder="输入型号关键字，如 3060">
+            <button class="btn ghost small" id="btnShModelQuery">查询</button>
+            <span class="muted">按型号包含匹配（忽略大小写/全半角/空格），与上方供应商、月份条件同时生效</span>
+          </div>
+          <div class="sh-hint" id="shModelHint" hidden></div>
           <div class="statcards" id="shStats"></div>
           <div class="tablewrap" id="shTable"><div class="empty">加载中…</div></div>
           <details class="fold fold-sub" id="foldEvents">

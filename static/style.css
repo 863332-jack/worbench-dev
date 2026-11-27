@@ -124,6 +124,18 @@ input[type=month]{ padding:8px 10px; border:1px solid var(--line); border-radius
 .gap-down{ color:var(--green); font-weight:600; }
 .difftag{ display:inline-block; padding:1px 7px; margin:1px 3px 1px 0; border-radius:9px;
   background:#f2f5fa; color:#455; font-size:11px; white-space:nowrap; }
+/* 供应商历史台账：型号手动查询（输入框 + 生效提示条） */
+.sh-model-input{ min-width:240px; max-width:320px; }
+.sh-hint{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:-2px 0 14px;
+  padding:8px 12px; border:1px solid #d8e4fb; border-radius:8px; background:#eef4ff;
+  font-size:12.5px; color:#3b5a8f; }
+.sh-hint[hidden]{ display:none; }
+.sh-hint .kw{ font-weight:650; color:var(--primary); }
+.sh-hint .btn{ padding:4px 10px; font-size:12px; }
+/* 命中型号列：上行数量、下行型号名（避免把表格挤到换行错位） */
+.sh-hit{ min-width:92px; }
+.sh-hit-names{ display:block; margin-top:2px; font-size:11px; color:var(--muted); }
+.sh-period{ white-space:nowrap; }
 /* 供应商历史台账：状态标记 */
 .sh-status{ display:inline-block; padding:1px 8px; border-radius:9px; font-size:11px; white-space:nowrap; }
 .sh-new{ background:var(--green-bg); color:var(--green); }
