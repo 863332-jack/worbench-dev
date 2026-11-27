@@ -72,7 +72,9 @@
 ### 3.4 资源占用与限制
 
 - 实测容器常驻内存约 60–90 MB，峰值（并发解析 Excel）约 300 MB
-- 本轮已在 compose 加了 `mem_limit: 1g` / `cpus: "2.0"`，给 NAS 上其他套件留出余量
+- 本轮已在 compose 加了 `mem_limit: 1g`，给 NAS 上其他套件留出余量
+- **不要加 `cpus:`**：DS1621+ 内核未启用 CPU CFS 调度器，设 NanoCPUs 会让容器在 Recreate 阶段
+  报 `NanoCPUs can not be set ... cgroup is not mounted`，表现为「镜像构建成功但项目 BUILD_FAILED」
 - 日志双重限流：应用日志 `RotatingFileHandler` 1 MB×5；容器日志 `json-file` 10 MB×3
 
 ---
@@ -87,7 +89,7 @@
 | `app.py` | 新增 **`GET /api/admin/diagnostics`**（仅管理员） | 没有 SSH 时唯一的容器内部视图：五个目录的存在性/可写性、SQLite 页数/空闲页/WAL、备份清单、磁盘余量、生效配置 |
 | `app.py` | 启动横幅打印版本号、日志级别、保留策略 | 从 Container Manager 的日志就能确认参数是否生效 |
 | `db.py` | 连接级 PRAGMA：`cache_size=16MB`、`temp_store=MEMORY`、`mmap_size=128MB`；`synchronous=NORMAL` 做成 `RECON_SQLITE_FAST` 开关（默认关） | 只提速不改持久化语义；`NORMAL` 有断电丢最后几笔的代价，因此不默认开启 |
-| `docker-compose.yml` | 版本号、7 个运维环境变量、`stop_grace_period: 20s`、`mem_limit` / `cpus`、密码 `:?` 强制 | 见上 |
+| `docker-compose.yml` | 版本号、7 个运维环境变量、`stop_grace_period: 20s`、`mem_limit`、密码 `:?` 强制（**未用 `cpus`**，内核不支持） | 见上 |
 | `Dockerfile` | `ARG APP_VERSION` + OCI label + `ENV RECON_VERSION` | `docker inspect` 就能看出镜像版本 |
 | `scripts/nas_verify.py` | 新增：纯 HTTP 体检，默认只读；`--full` 仅限空库 | 替代会清库的 `smoke_test.py`，可在生产上随时跑 |
 | `NAS-Docker部署指南.md` | 卷号提示 | 防止改错卷 |
@@ -100,7 +102,7 @@
 |---|---|---|---|---|
 | 1 | `RECON_ADMIN_PASSWORD` | `.env` 中已有 | **保持**，并把 `.env` 权限改 600 | 改密码：编辑 `.env` → 在 Container Manager 里**重新构建项目**（`restart` 不生效） |
 | 2 | compose 的 `${VAR:?}` 语法 | 已启用 | 需确认 Container Manager 能解析 | 若"构建"时报 compose 语法错误，把该行改成 `RECON_ADMIN_PASSWORD: ${RECON_ADMIN_PASSWORD:-}` 即可（但会恢复"缺变量则回退旧密码"的行为） |
-| 3 | `mem_limit: 1g` / `cpus: "2.0"` | 已启用 | 保持 | 若重建报未知字段，注释掉这两行，不影响启动 |
+| 3 | `mem_limit: 1g` | 已启用（已实测生效） | 保持 | `cpus: "2.0"` 在本机实测**会导致 BUILD_FAILED**（内核无 CFS 调度器），已移除，勿再加回 |
 | 4 | `RECON_RETENTION_DAYS` | 90 | **按对账周期定**：能支撑季度复查 → 建议 180 | 改 `.env` 后重建 |
 | 5 | `RECON_DAILY_BACKUP` | 1（开） | 保持开，`RECON_BACKUP_KEEP=10` | 备份落在 `storage/data/backups/`，约 0.75 MB/份 |
 | 6 | `RECON_SQLITE_FAST` | 0 | 保持 0 | 只有导入大文件明显卡时才考虑改 1 |

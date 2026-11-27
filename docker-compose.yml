@@ -55,9 +55,10 @@ services:
     # user: "1026:100"
     # ---- 资源限制：NAS 上还有其他套件在跑，给个上限避免失控 ----
     # 已实测该容器常驻内存约 60–90MB，峰值（并发解析 Excel）约 300MB，1G 上限足够宽松。
-    # 若 Container Manager 版本较旧不认 mem_limit，注释掉这两行即可，不影响启动。
+    # 注意：不要加 `cpus:` —— DS1621+ 的内核未启用 CPU CFS 调度器，设置 NanoCPUs 会让
+    # 容器在 Recreate 阶段直接失败（Error: NanoCPUs can not be set ... cgroup is not mounted），
+    # 表现为「镜像构建成功但项目状态 BUILD_FAILED」。
     mem_limit: 1g
-    cpus: "2.0"
     logging:
       driver: json-file
       options:
