@@ -699,14 +699,53 @@ if __name__ == "__main__":
     import socket
 
     def lan_ip():
+        """取本机局域网 IP。
+
+        不能只靠 UDP 连 8.8.8.8 探测：开了 VPN / 代理隧道时，那条路由会走
+        utun 虚拟网卡，拿到的就是 198.18.x.x 这类保留地址，打印出来别人根本
+        连不上。这里改为按网卡枚举，跳过回环、隧道、虚拟网卡与保留网段。
+        """
+        import fcntl
+        import struct
+
+        def _if_ip(name):
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                # macOS SIOCGIFADDR
+                r = fcntl.ioctl(s.fileno(), 0xC0206921,
+                                struct.pack("256s", name[:15].encode()))
+                return socket.inet_ntoa(r[20:24])
+            except Exception:
+                return None
+            finally:
+                s.close()
+
+        bad_prefix = ("127.", "169.254.", "198.18.", "198.19.", "0.")
+        skip_if = ("lo", "utun", "gif", "stf", "bridge", "awdl", "llw", "anpi", "nan")
+
+        try:
+            names = [n for _, n in socket.if_nameindex()
+                     if not n.startswith(skip_if)]
+            # 有线/无线物理网卡优先
+            names.sort(key=lambda n: (0 if n in ("en0", "en1") else 1, n))
+            for n in names:
+                ip = _if_ip(n)
+                if ip and not ip.startswith(bad_prefix):
+                    return ip
+        except Exception:
+            pass
+
+        # 兜底：UDP 探测，但剔除保留网段
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
             ip = s.getsockname()[0]
             s.close()
-            return ip
+            if ip and not ip.startswith(bad_prefix):
+                return ip
         except Exception:
-            return "127.0.0.1"
+            pass
+        return "127.0.0.1"
 
     housekeeping()
     ip = lan_ip()
