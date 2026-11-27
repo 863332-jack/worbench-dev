@@ -124,6 +124,29 @@
           <div class="sh-hint" id="shModelHint" hidden></div>
           <div class="statcards" id="shStats"></div>
           <div class="tablewrap" id="shTable"><div class="empty">加载中…</div></div>
+          <!-- 型号明细查询与编辑（管理员）：只列有效价明细，可逐条改单价/数量/期间等 -->
+          <details class="fold fold-sub" id="foldHistEdit">
+            <summary class="fold-head">
+              <span class="fold-ico" aria-hidden="true"></span>
+              <h3>型号明细查询与编辑</h3>
+              <span class="admin-tag">管理员可编辑</span>
+              <span class="fold-count" id="foldHistEditCount"></span>
+              <span class="fold-hint" data-closed="展开查询" data-open="收起查询"></span>
+            </summary>
+            <div class="fold-body">
+              <p class="muted fold-desc">按型号关键字列出<b>有效价明细</b>的逐条记录，点「编辑」即可修改型号、期间、单价、数量、合计金额、账单日期、材质规格与备注。保存后立即重建价格基准与台账并写入一条状态变化记录 —— <span class="ed-warn">改动会马上影响后续账单核对</span>。供应商与来源（批次、文件、行号）不可在此修改。</p>
+              <div class="form-row">
+                <label>型号查询</label>
+                <input type="text" id="edModel" class="sh-model-input" maxlength="60"
+                       autocomplete="off" spellcheck="false" placeholder="输入型号关键字，如 3060">
+                <button class="btn ghost small" id="btnEdQuery">查询</button>
+                <button class="btn ghost small" id="btnEdClear" hidden>清空</button>
+                <span class="muted">按型号包含匹配（忽略大小写/全半角/空格），仅列出有效价明细</span>
+              </div>
+              <div class="sh-hint" id="edHint" hidden></div>
+              <div class="ms-body" id="edBody"><div class="empty">输入型号关键字开始检索</div></div>
+            </div>
+          </details>
           <details class="fold fold-sub" id="foldEvents">
             <summary class="fold-head">
               <span class="fold-ico" aria-hidden="true"></span>

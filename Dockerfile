@@ -13,7 +13,7 @@ FROM python:3.13-slim
 
 # 版本信息写进镜像元数据：docker inspect 能看到，配合 /api/status 的 version 字段
 # 可以确认"NAS 上跑的到底是哪一版代码"（改完代码忘了重建镜像时，这里不会变）。
-ARG APP_VERSION=1.4.0
+ARG APP_VERSION=1.5.0
 LABEL org.opencontainers.image.title="recon-system" \
       org.opencontainers.image.description="供应商账单核对系统" \
       org.opencontainers.image.version="${APP_VERSION}"

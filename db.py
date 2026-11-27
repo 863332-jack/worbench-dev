@@ -374,8 +374,17 @@ def now():
 
 # ---------- 供应商历史有效数据（按供应商 × 期间聚合的台账） ----------
 
-# 有效明细口径：不含空价/待核价等排除行，且单价必须 > 0
-VALID_COND = "COALESCE(exclude_reason,'')='' AND unit_price IS NOT NULL AND unit_price>0"
+def _valid_cond(alias=""):
+    """有效明细口径：不含空价/待核价等排除行，且单价必须 > 0。
+
+    alias 用于联表查询（import_batch 也有 supplier 列，不限定前缀会歧义）。
+    """
+    p = (alias + ".") if alias else ""
+    return ("COALESCE(%(p)sexclude_reason,'')='' AND %(p)sunit_price IS NOT NULL "
+            "AND %(p)sunit_price>0") % {"p": p}
+
+
+VALID_COND = _valid_cond()
 
 SUP_HIST_LABELS = {"new": "新增", "changed": "变更", "steady": "无变化",
                    "expired": "失效", "restored": "恢复"}
@@ -982,6 +991,306 @@ def search_hist_prices(keyword, limit=200, offset=0):
                 "min_price": agg["min_price"], "max_price": agg["max_price"],
                 "rows": rows, "limit": limit, "offset": offset,
                 "truncated": total > offset + len(rows)}
+    finally:
+        conn.close()
+
+
+# ---------- 历史有效明细：型号查询与编辑（仅管理员） ----------
+# 「供应商历史有效数据」里的型号查询要能直接改数（单价录错、期间写错、数量缺失等），
+# 因此只放行本模块列出的业务字段：供应商 / 批次号 / 来源文件与行号 / 排除原因
+# 一律不接受外部修改，避免一次编辑把记录搬到别家供应商或伪造来源。
+# 保存时在同一事务内重建价格基准与台账，三者要么一起生效、要么整体回滚。
+
+HIST_EDIT_MAX = 1e9        # 金额/数量上限：防手滑输入天文数字把基准算歪
+HIST_EDIT_FIELDS = ("model", "material", "size", "period", "quantity",
+                    "unit_price", "total_amount", "bill_date", "remark")
+HIST_FIELD_LABELS = {"model": "型号", "material": "材质", "size": "规格", "period": "期间",
+                     "quantity": "数量", "unit_price": "单价", "total_amount": "合计金额",
+                     "bill_date": "账单日期", "remark": "备注"}
+
+
+class HistEditError(ValueError):
+    """编辑历史明细的可预期错误：映射为 HTTP 4xx，并带逐字段提示 errors。"""
+
+    def __init__(self, message, status=400, errors=None):
+        super().__init__(message)
+        self.message = message
+        self.status = status
+        self.errors = errors or {}
+
+
+def _edit_text(value, label, key, errors, maxlen, required=False):
+    """文本框字段：去首尾与连续空白；超长/必填为空写入 errors。"""
+    s = "" if value is None else " ".join(str(value).split())
+    if required and not s:
+        errors[key] = "%s不能为空" % label
+    elif len(s) > maxlen:
+        errors[key] = "%s最长 %d 个字符" % (label, maxlen)
+    return s
+
+
+def _edit_num(value, label, key, errors, required=False, positive=False):
+    """数值字段：空 → None；非数字/非有限值/越界写入 errors 并返回 None。"""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        if required:
+            errors[key] = "%s不能为空" % label
+        return None
+    txt = str(value).strip().replace(",", "").replace("，", "")
+    try:
+        v = float(txt)
+    except (TypeError, ValueError):
+        errors[key] = "%s必须是数字" % label
+        return None
+    if not (v == v) or v in (float("inf"), float("-inf")):
+        errors[key] = "%s不是有效数字" % label
+        return None
+    if positive and v <= 0:
+        errors[key] = "%s必须大于 0" % label
+        return None
+    if not positive and v < 0:
+        errors[key] = "%s不能小于 0" % label
+        return None
+    if v > HIST_EDIT_MAX:
+        errors[key] = "%s超出上限（%g）" % (label, HIST_EDIT_MAX)
+        return None
+    return round(v, 4)
+
+
+def _free_dedup_hash(conn, key, row_id):
+    """为改过内容的明细重新分配去重哈希：同内容序号往下找，避开唯一索引冲突。
+
+    去重哈希 = 内容键 + 同内容序号。编辑后内容变了就要换哈希，但直接把序号重置为 1
+    可能撞上库里另一条同内容明细（idx_hist_dedup 唯一）。这里从 1 递增找到没人用的序号，
+    使「改成与现有明细完全相同」表现为另一条并列明细，而不是报错或覆盖别人。
+    """
+    for seq in range(1, 1000):
+        h = dedup_hash(key, seq)
+        hit = conn.execute("SELECT id FROM hist_price WHERE dedup_hash=? LIMIT 1", (h,)).fetchone()
+        if hit is None or hit["id"] == row_id:
+            return h
+    raise HistEditError("同内容明细过多（超过 999 条），请先整理数据后再编辑", status=409)
+
+
+def _fmt_num(v):
+    if v is None or v == "":
+        return "—"
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return ("%g" % f) if abs(f - round(f)) < 1e-9 else ("%.4f" % f).rstrip("0").rstrip(".")
+
+
+def search_valid_hist_prices(keyword, supplier=None, month_from="", month_to="",
+                             limit=200, offset=0):
+    """型号关键字 → 有效价明细（逐条可编辑，仅管理员接口使用）。
+
+    与 search_hist_prices 的差别：
+    - 只返回 VALID_COND 行（与台账「有效」口径完全一致），已排除/待核价行不出现，
+      避免在这些行上改出「有效但没价」的矛盾状态；
+    - 带齐可编辑字段（材质、规格、合计金额、备注）与来源信息（批次号、文件、行号、上传时间）。
+    匹配口径仍是 normalize_model() 归一化后对 model_norm 做包含匹配，LIKE 通配符已转义。
+    全程只读，不写库、不产生事件。
+    """
+    from parsers import normalize_model      # 延迟导入：与入库共用同一归一化函数
+    kw_raw = (keyword or "").strip()
+    kw = normalize_model(kw_raw)
+    empty = {"keyword": kw_raw, "norm": kw, "total": 0, "models": 0, "suppliers": [],
+             "min_price": None, "max_price": None, "amount_total": 0.0,
+             "rows": [], "limit": 0, "offset": 0, "truncated": False,
+             "fields": list(HIST_EDIT_FIELDS), "labels": dict(HIST_FIELD_LABELS)}
+    if not kw:
+        return empty
+    try:
+        limit = max(1, min(int(limit), 500))
+    except (TypeError, ValueError):
+        limit = 200
+    try:
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        offset = 0
+    like = "%" + _like_escape(kw) + "%"
+    where = ["h.model_norm LIKE ? ESCAPE '\\'", "(" + _valid_cond("h") + ")"]
+    args = [like]
+    if supplier:
+        where.append("h.supplier=?")
+        args.append(supplier)
+    if month_from:
+        where.append("COALESCE(NULLIF(h.period,''),'未标月份')>=?")
+        args.append(month_from)
+    if month_to:
+        where.append("COALESCE(NULLIF(h.period,''),'未标月份')<=?")
+        args.append(month_to)
+    wsql = " AND ".join(where)
+    conn = connect()
+    try:
+        agg = conn.execute(
+            """SELECT COUNT(*) AS total,
+                      COUNT(DISTINCT h.model_norm) AS models,
+                      MIN(h.unit_price) AS min_price,
+                      MAX(h.unit_price) AS max_price,
+                      COALESCE(SUM(COALESCE(NULLIF(h.total_amount,0),
+                                            h.quantity*h.unit_price, 0)), 0) AS amount_total
+               FROM hist_price h WHERE %s""" % wsql, args).fetchone()
+        total = agg["total"] or 0
+        if not total:
+            empty["norm"] = kw
+            return empty
+        suppliers = [r["supplier"] for r in conn.execute(
+            "SELECT DISTINCT h.supplier FROM hist_price h WHERE %s ORDER BY h.supplier" % wsql, args)]
+        rows = [dict(r) for r in conn.execute(
+            """SELECT h.id, h.batch_no, h.supplier, h.model, h.model_norm,
+                      h.material, h.size, h.quantity, h.total_amount, h.bill_date, h.remark,
+                      h.unit_price, h.period, h.source_file, h.source_row, h.created_at,
+                      b.file_name AS batch_file,
+                      COALESCE(NULLIF(b.created_at, ''), h.created_at) AS uploaded_at
+               FROM hist_price h
+               LEFT JOIN import_batch b ON b.batch_no = h.batch_no
+               WHERE %s
+               ORDER BY h.supplier, h.period, h.model_norm, h.id
+               LIMIT ? OFFSET ?""" % wsql, args + [limit, offset])]
+        for r in rows:
+            r["record_id"] = "%s · 第 %s 行" % (r["batch_no"] or "—", r["source_row"] or "—")
+        return {"keyword": kw_raw, "norm": kw, "total": total, "models": agg["models"] or 0,
+                "suppliers": suppliers,
+                "min_price": agg["min_price"], "max_price": agg["max_price"],
+                "amount_total": round(agg["amount_total"] or 0, 2),
+                "rows": rows, "limit": limit, "offset": offset,
+                "truncated": total > offset + len(rows),
+                "fields": list(HIST_EDIT_FIELDS), "labels": dict(HIST_FIELD_LABELS)}
+    finally:
+        conn.close()
+
+
+def update_hist_price(row_id, payload, ref="管理员编辑"):
+    """修改一条历史有效明细，并在同一事务内重建价格基准与台账。
+
+    只接受 HIST_EDIT_FIELDS 里的字段，其它键（supplier/batch_no/source_*/exclude_reason…）
+    一律忽略，防止越权改动归属与来源。校验不过抛 HistEditError（带 errors 逐字段提示）。
+    返回 {"id", "row", "changed_fields", "changes", "idx_count", "ledger"}。
+    """
+    from parsers import normalize_model
+    payload = payload or {}
+    conn = connect()
+    conn.isolation_level = None              # 手动事务：明细 + 基准 + 台账一起提交
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute("SELECT * FROM hist_price WHERE id=?", (row_id,)).fetchone()
+        if row is None:
+            raise HistEditError("记录不存在或已被删除，请重新查询后再试", status=404)
+        old = dict(row)
+        reason = (old.get("exclude_reason") or "").strip()
+        if reason:
+            raise HistEditError(
+                "该明细已被排除（%s），不属于有效数据，不能在这里编辑" % reason, status=409)
+
+        errors = {}
+        new = dict(old)
+        if "model" in payload:
+            new["model"] = _edit_text(payload.get("model"), "型号", "model", errors, 80, required=True)
+        if "material" in payload:
+            new["material"] = _edit_text(payload.get("material"), "材质", "material", errors, 60)
+        if "size" in payload:
+            new["size"] = _edit_text(payload.get("size"), "规格", "size", errors, 60)
+        if "remark" in payload:
+            new["remark"] = _edit_text(payload.get("remark"), "备注", "remark", errors, 200)
+        if "period" in payload:
+            p = _edit_text(payload.get("period"), "期间", "period", errors, 7)
+            if not errors.get("period"):
+                if p and not re.match(r"^\d{4}-(0[1-9]|1[0-2])$", p):
+                    errors["period"] = "期间格式应为 YYYY-MM（如 2026-07），留空表示未标月份"
+                else:
+                    new["period"] = p
+        if "bill_date" in payload:
+            d = _edit_text(payload.get("bill_date"), "账单日期", "bill_date", errors, 10)
+            if not errors.get("bill_date"):
+                if d:
+                    try:
+                        if not re.match(r"^\d{4}-\d{2}-\d{2}$", d):
+                            raise ValueError(d)
+                        datetime.strptime(d, "%Y-%m-%d")   # 再确认是真实日期（挡掉 02-30）
+                        new["bill_date"] = d
+                    except ValueError:
+                        errors["bill_date"] = "账单日期应为 YYYY-MM-DD，且必须是真实存在的日期"
+                else:
+                    new["bill_date"] = ""
+        if "unit_price" in payload:
+            price = _edit_num(payload.get("unit_price"), "单价", "unit_price", errors,
+                              required=True, positive=True)
+            if price is not None:
+                new["unit_price"] = price
+        if "quantity" in payload:
+            new["quantity"] = _edit_num(payload.get("quantity"), "数量", "quantity", errors)
+        if "total_amount" in payload:
+            new["total_amount"] = _edit_num(payload.get("total_amount"), "合计金额",
+                                            "total_amount", errors)
+
+        norm = normalize_model(new.get("model"))
+        if not errors and not norm:
+            errors["model"] = "型号不能为空（归一化后为空字符）"
+        if errors:
+            raise HistEditError("有 %d 项内容不合法，请修正后再保存" % len(errors), errors=errors)
+        new["model_norm"] = norm
+
+        # 逐字段比对：数值按误差比较，文本按去空白后的原值比较
+        changes = []
+        for f in HIST_EDIT_FIELDS:
+            a, b = old.get(f), new.get(f)
+            if f in ("unit_price", "quantity", "total_amount"):
+                if (a is None) != (b is None) or (a is not None and abs(float(a) - float(b)) > 1e-9):
+                    changes.append({"field": f, "label": HIST_FIELD_LABELS[f],
+                                    "from": _fmt_num(a), "to": _fmt_num(b)})
+            elif (a or "") != (b or ""):
+                changes.append({"field": f, "label": HIST_FIELD_LABELS[f],
+                                "from": a or "—", "to": b or "—"})
+        if not changes:
+            raise HistEditError("内容没有变化，无需保存")
+
+        key = dedup_key({"supplier": new.get("supplier"), "model_norm": norm,
+                         "model": new.get("model"), "unit_price": new.get("unit_price"),
+                         "period": new.get("period"), "bill_date": new.get("bill_date"),
+                         "quantity": new.get("quantity"),
+                         "total_amount": new.get("total_amount"),
+                         "remark": new.get("remark")})
+        h = _free_dedup_hash(conn, key, old["id"])
+
+        conn.execute(
+            """UPDATE hist_price
+               SET model=?, model_norm=?, material=?, size=?, period=?, quantity=?,
+                   unit_price=?, total_amount=?, bill_date=?, remark=?, dedup_hash=?
+               WHERE id=?""",
+            (new.get("model"), norm, new.get("material"), new.get("size"),
+             new.get("period") or "", new.get("quantity"), new.get("unit_price"),
+             new.get("total_amount"), new.get("bill_date") or "", new.get("remark"),
+             h, old["id"]))
+
+        # 基准与台账同步重建：编辑了价格/数量/期间，二者都必须立即反映，否则核对会用旧基准
+        edit_ref = "%s #%d" % (ref, old["id"])
+        idx_count = _rebuild_price_index_conn(conn)
+        ledger = rebuild_supplier_history(ref=edit_ref, conn=conn)
+        detail = "；".join("%s %s → %s" % (c["label"], c["from"], c["to"]) for c in changes)
+        _log_supplier_event(conn, new.get("supplier"), new.get("period") or "",
+                            "changed", "编辑明细 #%d：%s" % (old["id"], detail), edit_ref)
+
+        fresh = dict(conn.execute("SELECT * FROM hist_price WHERE id=?", (old["id"],)).fetchone())
+        conn.execute("COMMIT")
+        return {
+            "id": old["id"],
+            "row": {k: fresh.get(k) for k in
+                    ("id", "batch_no", "supplier", "model", "model_norm", "material", "size",
+                     "period", "quantity", "total_amount", "bill_date", "remark",
+                     "unit_price", "source_file", "source_row")},
+            "changed_fields": [c["label"] for c in changes],
+            "changes": changes,
+            "idx_count": idx_count,
+            "ledger": ledger,
+        }
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error:
+            pass
+        raise
     finally:
         conn.close()
 

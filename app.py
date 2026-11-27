@@ -512,6 +512,77 @@ def api_supplier_history_rebuild():
                    msg="台账已重建：更新 %d 个供应商期间，新增状态变化 %d 条" % (r["changed"], r["events"]))
 
 
+# ---------- 型号明细查询与编辑（仅管理员，属于「供应商历史有效数据」） ----------
+HIST_EDIT_DENIED = ("「供应商历史有效数据」的型号查询与编辑仅管理员可用，"
+                    "请先以管理员身份登录后再操作")
+
+
+def _require_admin_for_hist_edit():
+    """未登录管理员时返回 403 响应，否则返回 None。"""
+    if not is_admin_session():
+        log.warning("拒绝未授权访问：%s %s（来自 %s）",
+                    request.method, request.path, request.remote_addr)
+        return jsonify(ok=False, error=HIST_EDIT_DENIED), 403
+    return None
+
+
+def _hist_month_args():
+    """解析并校验 month_from/month_to；返回 (from, to, 错误响应或 None)。"""
+    month_from = (request.args.get("month_from") or "").strip()
+    month_to = (request.args.get("month_to") or "").strip()
+    for m in (month_from, month_to):
+        if m and not re.match(r"^\d{4}-\d{2}$", m):
+            return month_from, month_to, (jsonify(ok=False, error="月份格式应为 YYYY-MM（如 2026-07）"), 400)
+    if month_from and month_to and month_from > month_to:
+        return month_from, month_to, (jsonify(ok=False, error="起始月份不能晚于结束月份"), 400)
+    return month_from, month_to, None
+
+
+@app.route("/api/admin/hist-prices")
+def api_admin_hist_prices():
+    """型号关键字 → 有效价明细（逐条可编辑）。只读查询，不写库、不产生事件。"""
+    denied = _require_admin_for_hist_edit()
+    if denied:
+        return denied
+    model = (request.args.get("model") or "").strip()
+    if not model:
+        return jsonify(ok=False, error="请输入型号关键字后再查询"), 400
+    if len(model) > 60:
+        return jsonify(ok=False, error="型号关键字最长 60 个字符"), 400
+    month_from, month_to, bad = _hist_month_args()
+    if bad:
+        return bad
+    supplier = (request.args.get("supplier") or "").strip()
+    try:
+        data = db.search_valid_hist_prices(
+            model, supplier or None, month_from, month_to,
+            request.args.get("limit") or 200, request.args.get("offset") or 0)
+    except Exception as e:
+        log.exception("型号明细查询失败：model=%s", model)
+        return jsonify(ok=False, error="查询失败：%s" % e), 500
+    return jsonify(ok=True, **data)
+
+
+@app.route("/api/admin/hist-prices/<int:row_id>", methods=["POST"])
+def api_admin_hist_price_update(row_id):
+    """保存一条有效价明细的修改（管理员）。字段校验在数据层统一做，失败带逐字段提示。"""
+    denied = _require_admin_for_hist_edit()
+    if denied:
+        return denied
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(ok=False, error="请求体应为 JSON 对象（如 {\"unit_price\": 12.5}）"), 400
+    try:
+        r = db.update_hist_price(row_id, payload, ref="管理员编辑")
+    except db.HistEditError as e:
+        return jsonify(ok=False, error=e.message, errors=e.errors), e.status
+    except Exception as e:
+        log.exception("编辑历史明细失败 id=%s", row_id)
+        return jsonify(ok=False, error="保存失败：%s" % e), 500
+    log.info("管理员编辑历史明细 #%d：%s", row_id, "、".join(r["changed_fields"]))
+    return jsonify(ok=True, msg="已保存：%s" % "、".join(r["changed_fields"]), **r)
+
+
 # ---------- 账单备份：按条件筛选 → 打包下载（可归档、可回灌） ----------
 
 def _backup_filters(args):

@@ -146,6 +146,34 @@ input[type=month]{ padding:8px 10px; border:1px solid var(--line); border-radius
 .ms-kw{ font-weight:650; color:var(--primary); }
 .badge.warn{ background:#fff6e5; color:#b26a00; }
 .loading.dark{ border-color:var(--primary); border-top-color:transparent; }
+/* 型号明细查询与编辑（管理员 · 供应商历史有效数据） */
+.ed-warn{ color:var(--orange); font-weight:600; }
+.ed-table td{ vertical-align:top; }
+.ed-table th{ white-space:nowrap; }
+.ed-num{ white-space:nowrap; font-variant-numeric:tabular-nums; }
+.ed-remark{ max-width:180px; word-break:break-word; }
+.ed-src{ font-size:12px; color:var(--muted); white-space:nowrap; }
+.ed-ops{ white-space:nowrap; }
+/* 操作列吸附在右侧：表格横向滚动时「保存/取消」不会被挤出视野 */
+.ed-table th:last-child, .ed-table td.ed-ops{ position:sticky; right:0; z-index:1;
+  background:var(--card); border-left:1px solid var(--line); }
+.ed-table thead th:last-child{ z-index:2; }
+.ed-editing td.ed-ops{ background:#fbfdff; }
+.ed-table td.ed-ops{ min-width:112px; }
+.ed-ops .btn{ padding:5px 10px; font-size:12px; }
+.ed-ops .btn+.btn{ margin-left:6px; }
+.ed-editing td{ background:#fbfdff; }
+.ed-in{ display:block; width:100%; min-width:66px; padding:6px 8px; border:1px solid var(--line);
+  border-radius:6px; font-size:12.5px; font-family:inherit; color:var(--text); background:#fff; }
+.ed-in+.ed-in{ margin-top:5px; }
+.ed-in:focus{ outline:none; border-color:var(--primary); box-shadow:0 0 0 3px rgba(47,111,237,.15); }
+.ed-in.ed-bad{ border-color:var(--red); background:#fff7f7; }
+.ed-fmsg{ display:block; margin-top:3px; font-size:11px; line-height:1.5; color:var(--red); }
+.ed-amt{ min-width:132px; }
+.ed-amt .ed-recalc{ display:block; margin-top:5px; padding:3px 8px; font-size:11px; }
+.ed-err{ margin-top:6px; font-size:11.5px; line-height:1.6; color:var(--red);
+  white-space:normal; max-width:190px; }
+.ed-note{ margin-top:10px; font-size:12px; color:var(--muted); }
 /* 供应商历史台账：状态标记 */
 .sh-status{ display:inline-block; padding:1px 8px; border-radius:9px; font-size:11px; white-space:nowrap; }
 .sh-new{ background:var(--green-bg); color:var(--green); }

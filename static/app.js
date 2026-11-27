@@ -803,6 +803,258 @@ if(btnSupHistRebuild) btnSupHistRebuild.addEventListener('click',async(ev)=>{
   }catch(e){ toast('重建请求失败：'+e.message); }
 });
 
+// ===== 型号明细查询与编辑（管理员 · 供应商历史有效数据）=====
+// 只列「有效价明细」（与台账有效口径完全一致），保存走后端逐字段校验；
+// 成功后后端在同一事务内重建价格基准与台账，前端再刷新明细表与台账。
+// 非管理员页面里没有这块 DOM，接口也会 403 —— 前后端双重限制。
+(function initHistEdit(){
+  const input=$('#edModel');
+  if(!input) return;
+  const body=$('#edBody'), hint=$('#edHint'), clearBtn=$('#btnEdClear'), cnt=$('#foldHistEditCount');
+  const IDLE='<div class="empty">输入型号关键字开始检索</div>';
+  let timer=null, seq=0, lastKw='';
+  let rows=[], editing=null, draft=null;
+
+  function reset(){
+    if(timer){ clearTimeout(timer); timer=null; }
+    seq++; lastKw=''; editing=null; draft=null; rows=[];
+    hint.hidden=true; hint.innerHTML='';
+    if(clearBtn) clearBtn.hidden=true;
+    if(cnt) cnt.textContent='';
+    body.innerHTML=IDLE;
+  }
+  function showError(msg){
+    lastKw='';                        // 失败不记住关键字：回车/重输可以重试
+    hint.hidden=true;
+    body.innerHTML=`<div class="empty"><span class="st-err">${esc(msg)}</span>
+      <div class="muted">请稍后重试，或刷新页面后再查</div></div>`;
+  }
+  function forbid(){
+    lastKw=''; hint.hidden=true;
+    body.innerHTML=`<div class="empty"><span class="st-err">没有权限</span>
+      <div class="muted">型号明细的查询与编辑仅管理员可用，请以管理员身份登录后再试</div></div>`;
+  }
+
+  // ---- 编辑态：字段值只在内存里，取消即丢弃 ----
+  function val(k){ const v=draft.v[k]; return (v===null||v===undefined)?'' : String(v); }
+  function inp(k, type, extra){
+    const e=(draft.err && draft.err[k]);
+    return `<input class="ed-in${e?' ed-bad':''}" data-k="${k}" type="${type}" value="${esc(val(k))}" ${extra||''}>`
+      +(e?`<span class="ed-fmsg">${esc(e)}</span>`:'');
+  }
+  function rowView(x){
+    const q=(x.quantity===null||x.quantity===undefined)?'—':Number(x.quantity).toLocaleString();
+    return `<tr data-id="${x.id}">
+      <td><b>${esc(x.model)}</b></td>
+      <td>${esc(x.supplier)}</td>
+      <td class="sh-period">${esc(x.period||'—')}</td>
+      <td class="ed-num">${money(x.unit_price)}</td>
+      <td class="ed-num">${q}</td>
+      <td class="ed-num">${x.total_amount===null||x.total_amount===undefined?'—':money(x.total_amount)}</td>
+      <td class="sh-period">${esc(x.bill_date||'—')}</td>
+      <td>${esc([x.material,x.size].filter(Boolean).join(' / ')||'—')}</td>
+      <td class="ed-remark" title="${esc(x.remark||'')}">${esc(x.remark||'—')}</td>
+      <td class="ed-src">${esc(x.batch_no||'—')}<span class="ms-sub">${esc(x.source_file||'—')} · 第 ${esc(x.source_row||'—')} 行</span></td>
+      <td class="ed-ops"><button type="button" class="btn ghost small" data-act="edit">编辑</button></td>
+    </tr>`;
+  }
+  function rowEdit(x){
+    // 字段级提示挂在输入框下方（.ed-fmsg）；这里只放整体/服务端消息，
+    // 同一句话不在两个地方重复出现。
+    const msg=draft.msg || '';
+    return `<tr data-id="${x.id}" class="ed-editing">
+      <td>${inp('model','text','maxlength="80"')}</td>
+      <td>${esc(x.supplier)}<span class="ms-sub">不可改</span></td>
+      <td>${inp('period','text','maxlength="7" placeholder="YYYY-MM"')}</td>
+      <td>${inp('unit_price','number','step="0.0001" min="0"')}</td>
+      <td>${inp('quantity','number','step="any" min="0"')}</td>
+      <td class="ed-amt">${inp('total_amount','number','step="0.01" min="0"')}
+        <button type="button" class="btn ghost small ed-recalc" data-act="recalc"
+                title="按 数量×单价 重算合计金额">重算</button></td>
+      <td>${inp('bill_date','text','maxlength="10" placeholder="YYYY-MM-DD"')}</td>
+      <td>${inp('material','text','maxlength="60" placeholder="材质"')}${inp('size','text','maxlength="60" placeholder="规格"')}</td>
+      <td>${inp('remark','text','maxlength="200"')}</td>
+      <td class="ed-src">${esc(x.batch_no||'—')}<span class="ms-sub">${esc(x.source_file||'—')} · 第 ${esc(x.source_row||'—')} 行</span></td>
+      <td class="ed-ops">
+        <button type="button" class="btn primary small" data-act="save">保存</button>
+        <button type="button" class="btn ghost small" data-act="cancel">取消</button>
+        ${msg?`<div class="ed-err">${esc(msg)}</div>`:''}
+      </td>
+    </tr>`;
+  }
+
+  function renderSummary(r){
+    if(cnt) cnt.textContent = r.total
+      ? `${r.total} 条有效明细 · ${r.models} 个型号` : '无匹配';
+    if(!r.total){ hint.hidden=true; hint.innerHTML=''; return; }
+    hint.hidden=false;
+    hint.innerHTML=`型号包含「<span class="kw">${esc(r.keyword)}</span>」 · 命中 <b>${r.total}</b> 条有效明细`
+      +` / ${r.models} 个型号 / ${r.suppliers.length} 家供应商 · 单价 ${money(r.min_price)} ~ ${money(r.max_price)}`
+      +(r.truncated?`<span class="muted">（仅显示前 ${r.rows.length} 条，请补充关键字缩小范围）</span>`:'');
+  }
+  function render(){
+    if(!rows.length){
+      body.innerHTML=`<div class="empty">没有型号包含 <span class="ms-kw">${esc(lastKw)}</span> 的有效明细
+        <div class="muted">请检查型号拼写，或换用更短的关键字（如只输入型号前几位）</div></div>`;
+      return;
+    }
+    let h='<div class="tablewrap"><table class="ed-table"><thead><tr>'
+      +'<th>型号</th><th>供应商</th><th>期间</th><th>单价</th><th>数量</th><th>合计金额</th>'
+      +'<th>账单日期</th><th>材质 / 规格</th><th>备注</th><th>记录标识</th><th>操作</th></tr></thead><tbody>';
+    rows.forEach(x=>{ h += (editing===x.id ? rowEdit(x) : rowView(x)); });
+    h+='</tbody></table></div>';
+    if(editing) h+='<div class="ed-note">改单价后若合计金额也要跟着变，点「重算」按 数量×单价 更新；不点则保留原始金额。</div>';
+    body.innerHTML=h;
+  }
+
+  // ---- 客户端初筛：只为省一次往返，真正的校验在后端 ----
+  function localCheck(v){
+    const e={};
+    const model=String(v.model==null?'':v.model).trim();
+    if(!model) e.model='型号不能为空';
+    else if(model.length>80) e.model='型号最长 80 个字符';
+    const p=String(v.unit_price==null?'':v.unit_price).trim();
+    if(p==='' ) e.unit_price='单价不能为空';
+    else if(!(Number(p)>0)) e.unit_price='单价必须是大于 0 的数字';
+    const q=String(v.quantity==null?'':v.quantity).trim();
+    if(q!=='' && !(Number(q)>=0)) e.quantity='数量必须是 ≥ 0 的数字';
+    const amt=String(v.total_amount==null?'':v.total_amount).trim();
+    if(amt!=='' && !(Number(amt)>=0)) e.total_amount='合计金额必须是 ≥ 0 的数字';
+    const per=String(v.period==null?'':v.period).trim();
+    if(per && !/^\d{4}-(0[1-9]|1[0-2])$/.test(per)) e.period='期间格式 YYYY-MM（如 2026-07）';
+    const d=String(v.bill_date==null?'':v.bill_date).trim();
+    if(d && !/^\d{4}-\d{2}-\d{2}$/.test(d)) e.bill_date='账单日期格式 YYYY-MM-DD';
+    if(String(v.remark==null?'':v.remark).length>200) e.remark='备注最长 200 字';
+    return e;
+  }
+
+  async function run(kw, force){
+    kw=(kw||'').trim();
+    if(!kw){ reset(); return; }
+    if(!force && kw===lastKw) return;
+    lastKw=kw; editing=null; draft=null;
+    const my=++seq;
+    hint.hidden=true;
+    body.innerHTML='<div class="empty"><span class="loading dark"></span>正在检索…</div>';
+    try{
+      const resp=await fetch('/api/admin/hist-prices?model='+encodeURIComponent(kw));
+      if(my!==seq) return;
+      if(resp.status===403){ forbid(); return; }
+      const r=await resp.json();
+      if(my!==seq) return;
+      if(!r.ok){ showError(r.error||'检索失败'); return; }
+      rows=r.rows||[];
+      renderSummary(r); render();
+    }catch(e){
+      if(my!==seq) return;
+      showError('请求失败：'+e.message);
+    }
+  }
+
+  function startEdit(id){
+    const x=rows.find(v=>v.id===id);
+    if(!x) return;
+    editing=id;
+    draft={id:id, err:null, msg:'',
+      v:{model:x.model, material:x.material, size:x.size, period:x.period,
+         quantity:x.quantity, unit_price:x.unit_price, total_amount:x.total_amount,
+         bill_date:x.bill_date, remark:x.remark}};
+    render();
+    const tr=body.querySelector('tr[data-id="'+id+'"]');
+    const first=tr? tr.querySelector('input.ed-in') : null;
+    if(first) first.focus();
+  }
+
+  async function save(tr){
+    if(!draft) return;
+    const errs=localCheck(draft.v);
+    if(Object.keys(errs).length){ draft.err=errs; draft.msg=''; render(); return; }
+    const btn=tr.querySelector('button[data-act="save"]');
+    if(btn){ btn.disabled=true; btn.textContent='保存中…'; }
+    try{
+      const resp=await fetch('/api/admin/hist-prices/'+draft.id,{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(draft.v)
+      });
+      if(resp.status===403){ forbid(); return; }
+      const r=await resp.json();
+      if(!r.ok){
+        draft.err=r.errors||{};
+        draft.msg=r.error||'保存失败';
+        render();
+        return;
+      }
+      const changed=(r.changed_fields||[]).join('、');
+      toast('已保存：'+(changed||'内容已更新'));
+      editing=null; draft=null;
+      await run(lastKw, true);     // 型号若改到不再匹配，本条会从结果里消失
+      loadSupplierHistory();       // 台账指标同步刷新
+    }catch(e){
+      draft.msg='保存请求失败：'+e.message;
+      render();
+    }
+  }
+
+  function recalcAmt(tr){
+    if(!draft) return;
+    const q=Number(String(draft.v.quantity==null?'':draft.v.quantity).trim());
+    const p=Number(String(draft.v.unit_price==null?'':draft.v.unit_price).trim());
+    if(!isFinite(q)||!isFinite(p)){ draft.msg='先填好数量与单价再重算'; render(); return; }
+    const amt=Math.round(q*p*100)/100;
+    draft.v.total_amount=String(amt);
+    draft.msg='';
+    const el=tr.querySelector('input[data-k="total_amount"]');
+    if(el) el.value=String(amt);
+  }
+
+  body.addEventListener('click',async ev=>{
+    const btn=ev.target.closest('button[data-act]');
+    if(!btn) return;
+    const tr=btn.closest('tr[data-id]');
+    if(!tr) return;
+    const id=Number(tr.dataset.id);
+    const act=btn.dataset.act;
+    if(act==='edit') startEdit(id);
+    else if(act==='cancel'){ editing=null; draft=null; render(); }
+    else if(act==='recalc') recalcAmt(tr);
+    else if(act==='save') await save(tr);
+  });
+  body.addEventListener('input',ev=>{
+    const el=ev.target;
+    if(!draft || !el.dataset || !el.dataset.k) return;
+    draft.v[el.dataset.k]=el.value;
+    if(draft.err && draft.err[el.dataset.k]){ delete draft.err[el.dataset.k]; el.classList.remove('ed-bad'); }
+  });
+  body.addEventListener('keydown',ev=>{
+    if(!draft) return;
+    if(ev.key==='Escape'){ ev.preventDefault(); editing=null; draft=null; render(); }
+    else if(ev.key==='Enter' && ev.target.dataset && ev.target.dataset.k){
+      ev.preventDefault();
+      const tr=ev.target.closest('tr[data-id]');
+      if(tr) save(tr);
+    }
+  });
+
+  function schedule(){
+    const kw=input.value.trim();
+    if(clearBtn) clearBtn.hidden=!kw;
+    if(timer){ clearTimeout(timer); timer=null; }
+    if(!kw){ reset(); return; }
+    timer=setTimeout(()=>{ timer=null; run(kw); },300);
+  }
+  input.addEventListener('input',schedule);
+  input.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){ e.preventDefault(); if(timer){ clearTimeout(timer); timer=null; } run(input.value.trim(), true); }
+    else if(e.key==='Escape'){ e.preventDefault(); input.value=''; reset(); }
+  });
+  if(clearBtn) clearBtn.addEventListener('click',()=>{ input.value=''; reset(); input.focus(); });
+  const btnQuery=$('#btnEdQuery');
+  if(btnQuery) btnQuery.addEventListener('click',()=>{
+    if(timer){ clearTimeout(timer); timer=null; }
+    run(input.value.trim(), true);
+  });
+})();
+
 // ===== 账单备份导出（仅管理员；入口由服务端按会话渲染，非管理员页面里根本没有这块 DOM） =====
 function bkDenyIfNotAdmin(msgEl){
   if(state.isAdmin) return false;

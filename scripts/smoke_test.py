@@ -636,6 +636,146 @@ def main():
           "事件 %d→%d，行数 %d→%d" % (ev_before2, len(r5["events"]),
                                         rows_before2, len(r5["rows"])))
 
+    print("== 17. 型号明细查询与编辑（仅管理员 · 有效价明细） ==")
+    _DB = os.environ.get("SMOKE_DB_PATH") or os.path.join(ROOT, "data", "recon.db")
+    ed_rows = [["杰盛", "2027-07-01", "ED-1", "8*8", "铜", 10, 5, 50, ""],
+               ["杰盛", "2027-07-02", "ED-2", "", "塑料", 10, 7, 70, ""]]
+    f_ed = make_xlsx(os.path.join(TMP, "ed.xlsx"), ed_rows)
+    r = s.post(BASE + "/api/history/upload", files={"files": open(f_ed, "rb")}, timeout=30).json()
+    check("编辑用历史数据导入 ok", r.get("ok") is True and r.get("added") == 2, str(r)[:160])
+
+    # --- 权限：非管理员既不能查也不能改，页面里也不渲染这块 ---
+    s.post(BASE + "/api/auth/logout", timeout=10)
+    r = s.get(BASE + "/api/admin/hist-prices?model=ED-1", timeout=20)
+    check("非管理员：型号明细查询被拒 403 且提示明确",
+          r.status_code == 403 and "仅管理员" in (r.json().get("error") or ""),
+          "%s %s" % (r.status_code, r.text[:120]))
+    r = s.post(BASE + "/api/admin/hist-prices/1", json={"unit_price": 1}, timeout=20)
+    check("非管理员：保存明细被拒 403", r.status_code == 403, str(r.status_code))
+    page = s.get(BASE + "/", timeout=20).text
+    check("非管理员：页面源码中没有型号明细查询/编辑模块",
+          'id="foldHistEdit"' not in page and 'id="edModel"' not in page
+          and 'id="edBody"' not in page, "len=%d" % len(page))
+
+    s.post(BASE + "/api/auth/login", json={"password": "13662566518"}, timeout=10)
+    page = s.get(BASE + "/", timeout=20).text
+    check("管理员：页面渲染出型号明细查询与编辑模块",
+          'id="foldHistEdit"' in page and 'id="edModel"' in page and 'id="btnEdQuery"' in page,
+          "len=%d" % len(page))
+
+    # --- 查询：只返回有效价明细，带齐可编辑字段与来源 ---
+    r = s.get(BASE + "/api/admin/hist-prices?model=ED-1", timeout=20).json()
+    check("按型号查询只返回命中记录",
+          r.get("ok") and r["total"] == 1 and r["rows"][0]["model"] == "ED-1", str(r)[:200])
+    row = r["rows"][0]
+    check("结果含可编辑字段与来源信息",
+          all(k in row for k in ("id", "model", "material", "size", "period", "quantity",
+                                 "total_amount", "bill_date", "remark", "unit_price",
+                                 "batch_no", "source_file", "source_row", "uploaded_at")),
+          str(sorted(row.keys()))[:240])
+    check("空关键字被拒 400（不做全库导出）",
+          s.get(BASE + "/api/admin/hist-prices?model=", timeout=20).status_code == 400)
+    check("超长关键字被拒 400",
+          s.get(BASE + "/api/admin/hist-prices?model=" + "A" * 61, timeout=20).status_code == 400)
+    check("包含匹配且忽略大小写",
+          s.get(BASE + "/api/admin/hist-prices?model=ed-", timeout=20).json()["total"] == 2)
+    check("无匹配返回空集（不退化显示全部）",
+          s.get(BASE + "/api/admin/hist-prices?model=ZZZ-ED", timeout=20).json()["total"] == 0)
+    check("通配符 % 被当普通字符（不匹配全部）",
+          s.get(BASE + "/api/admin/hist-prices?model=%25", timeout=20).json()["total"] == 0)
+    n1 = s.get(BASE + "/api/status", timeout=20).json()["hist_rows"]
+    s.get(BASE + "/api/admin/hist-prices?model=ED-", timeout=20)
+    n2 = s.get(BASE + "/api/status", timeout=20).json()["hist_rows"]
+    check("型号明细查询全程只读（历史库行数不变）", n1 == n2, "%s → %s" % (n1, n2))
+
+    # --- 编辑：明细 + 价格基准 + 台账 同步生效 ---
+    rid = row["id"]
+    r = s.post(BASE + "/api/admin/hist-prices/%d" % rid, json={"unit_price": 6}, timeout=20).json()
+    check("保存单价成功并回显变更字段",
+          r.get("ok") is True and "单价" in (r.get("changed_fields") or []), str(r)[:200])
+    r2 = s.get(BASE + "/api/admin/hist-prices?model=ED-1", timeout=20).json()["rows"][0]
+    check("单价已落库（5 → 6）", abs(r2["unit_price"] - 6) < 1e-9, str(r2["unit_price"]))
+    _c = sqlite3.connect(_DB)
+    _pi = _c.execute("SELECT min_price FROM price_index WHERE model_norm='ED-1'").fetchone()
+    _c.close()
+    check("价格基准同步重建（ED-1 最低价 = 6）", _pi and abs(_pi[0] - 6) < 1e-9, str(_pi))
+    sh7 = s.get(BASE + "/api/suppliers/history?supplier=%E6%9D%B0%E7%9B%9B"
+                       "&month_from=2027-07&month_to=2027-07", timeout=20).json()
+    check("供应商台账同步刷新（2027-07 最低价 = 6）",
+          sh7["rows"] and abs(sh7["rows"][0]["min_price"] - 6) < 1e-9, str(sh7["rows"])[:200])
+    check("编辑留下可追溯的状态变化记录",
+          any("编辑明细" in (e["detail"] or "") for e in sh7["events"]), str(sh7["events"][:2])[:240])
+
+    # 改期间：记录搬到另一个期间，两边台账都要跟着变
+    s.post(BASE + "/api/admin/hist-prices/%d" % rid, json={"period": "2027-08"}, timeout=20)
+    m7 = s.get(BASE + "/api/suppliers/history?supplier=%E6%9D%B0%E7%9B%9B"
+                      "&month_from=2027-07&month_to=2027-07", timeout=20).json()["rows"]
+    m8 = s.get(BASE + "/api/suppliers/history?supplier=%E6%9D%B0%E7%9B%9B"
+                      "&month_from=2027-08&month_to=2027-08", timeout=20).json()["rows"]
+    check("改期间后台账按新期间重算（07 剩 ED-2、08 新出现）",
+          m7 and m7[0]["rows_valid"] == 1 and abs(m7[0]["min_price"] - 7) < 1e-9
+          and m8 and m8[0]["rows_valid"] == 1 and abs(m8[0]["min_price"] - 6) < 1e-9,
+          "07=%s 08=%s" % (m7 and m7[0]["rows_valid"], m8 and m8[0]["rows_valid"]))
+    s.post(BASE + "/api/admin/hist-prices/%d" % rid, json={"period": "2027-07"}, timeout=20)
+
+    # --- 校验：非法输入一律 400 且指出字段，不落库 ---
+    def _post(payload):
+        return s.post(BASE + "/api/admin/hist-prices/%d" % rid, json=payload, timeout=20)
+
+    r = _post({"unit_price": 0})
+    check("单价 0 被拒 400 并指出字段",
+          r.status_code == 400 and "unit_price" in (r.json().get("errors") or {}), r.text[:160])
+    r = _post({"period": "2027-13"})
+    check("期间非法被拒 400", r.status_code == 400 and "period" in (r.json().get("errors") or {}),
+          r.text[:160])
+    r = _post({"bill_date": "2027-02-30"})
+    check("不存在的日期被拒 400",
+          r.status_code == 400 and "bill_date" in (r.json().get("errors") or {}), r.text[:160])
+    r = _post({"model": "   "})
+    check("型号为空被拒 400", r.status_code == 400 and "model" in (r.json().get("errors") or {}),
+          r.text[:160])
+    r = _post({"unit_price": "abc"})
+    check("单价非数字被拒 400", r.status_code == 400, r.text[:120])
+    r = _post({"quantity": -1})
+    check("数量为负被拒 400", r.status_code == 400, r.text[:120])
+    r = _post({})
+    check("内容未变化时拒绝保存 400",
+          r.status_code == 400 and "没有变化" in (r.json().get("error") or ""), r.text[:160])
+    r = s.post(BASE + "/api/admin/hist-prices/99999999", json={"unit_price": 1}, timeout=20)
+    check("不存在的记录 404", r.status_code == 404, str(r.status_code))
+    r = s.post(BASE + "/api/admin/hist-prices/%d" % rid, data="notjson",
+               headers={"Content-Type": "application/json"}, timeout=20)
+    check("非 JSON 请求体被拒 400", r.status_code == 400, str(r.status_code))
+    r = _post({"supplier": "云锦", "remark": "越权测试"})
+    check("供应商不可通过编辑接口改动（只改了备注）",
+          r.status_code == 200 and r.json()["row"]["supplier"] == "杰盛"
+          and "供应商" not in (r.json().get("changed_fields") or []), r.text[:200])
+    _post({"remark": ""})          # 还原备注，便于后续「未变化」与污染检查
+    after = s.get(BASE + "/api/admin/hist-prices?model=ED-1", timeout=20).json()["rows"][0]
+    check("非法请求未污染数据（供应商/单价保持原值）",
+          after["supplier"] == "杰盛" and abs(after["unit_price"] - 6) < 1e-9, str(after)[:200])
+
+    # 已排除明细不在「有效数据」范围内，不允许在此编辑
+    _c = sqlite3.connect(_DB)
+    _c.execute("INSERT INTO hist_price(batch_no,supplier,model,model_norm,period,unit_price,"
+               "exclude_reason,dedup_hash,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+               ("ED-EX", "杰盛", "ED-EX", "ED-EX", "2027-09", None, "待核价",
+                "smoke-excluded-fixture", "2027-09-01 00:00:00"))
+    _c.commit()
+    ex_id = _c.execute("SELECT id FROM hist_price WHERE dedup_hash='smoke-excluded-fixture'"
+                       ).fetchone()[0]
+    _c.close()
+    r = s.post(BASE + "/api/admin/hist-prices/%d" % ex_id, json={"unit_price": 3}, timeout=20)
+    check("已排除明细不允许在有效数据中编辑（409）",
+          r.status_code == 409 and "排除" in (r.json().get("error") or ""), r.text[:160])
+    _c = sqlite3.connect(_DB)
+    _c.execute("DELETE FROM hist_price WHERE id=?", (ex_id,))
+    _c.commit()
+    dup = _c.execute("SELECT COUNT(*), COUNT(DISTINCT dedup_hash) FROM hist_price").fetchone()
+    _c.close()
+    check("多次编辑后去重哈希仍唯一（不撞唯一索引）", dup[0] == dup[1], str(dup))
+    s.post(BASE + "/api/suppliers/history/rebuild", timeout=30)
+
     print()
     print("=" * 48)
     print("冒烟测试结果：通过 %d 项 / 失败 %d 项" % (PASS, FAIL))
