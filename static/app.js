@@ -24,7 +24,7 @@ const STATUS_CLS = {
 const DIFF_LABEL = {
   amt_high:'金额偏高', amt_low:'金额偏低', no_hist:'无历史基准', parse_err:'单价无法解析',
   multi_level:'多档价待定', date_before:'日期早于基准', base_stale:'基准过期',
-  date_missing:'月份缺失', near_model:'型号近似匹配'
+  date_missing:'月份缺失', near_model:'型号近似匹配', low_qty:'历史数量偏少'
 };
 
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show');

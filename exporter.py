@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from config import (
     OUTPUT_DIR, STATUS_LABELS, DIFF_LABELS,
     STATUS_MATCHED_LOWEST, STATUS_NEEDS_REVIEW, STATUS_ABOVE_LOWEST,
-    STATUS_NO_HISTORY, STATUS_PARSE_ERROR,
+    STATUS_NO_HISTORY, STATUS_PARSE_ERROR, LOW_QTY_THRESHOLD,
 )
 import field_map
 import recon_stats
@@ -237,6 +237,7 @@ def fill_diff_summary(ws, summary):
             "base_stale": "最低价距今较久，价格可能已失效",
             "date_missing": "账单月份缺失，无法判断时效",
             "near_model": "型号近似命中（忽略符号差异），需确认是否同一物料",
+            "low_qty": "单价虽与历史最低价一致，但历史订单数量过少，可能是打样/小批量价而非批量做货价",
         }.get(d.get("code"), "")
         vals = [d.get("label"), d.get("rows"), d.get("overpay"), d.get("underpay"), note]
         for j, v in enumerate(vals, 1):
@@ -293,6 +294,9 @@ def export_results(recon_no, results, batch):
          % (" / ".join(headers), len(headers))),
         ("字段映射差异", "；".join(diff) if diff else "无差异：上传表头全部字段均成功映射"),
         ("匹配规则", "按供应商+型号匹配；材质仅展示不参与；最低价为历史有效单价（排除空价/待核价/0价）的最小值"),
+        ("低数量复核", "单价与历史最低价一致，但该价位的历史订单数量最多仍低于 %d 时，不判「已匹配」，"
+                       "转「需人工复核」：数量过少多为打样/小批量价，需确认价格类型与账单金额"
+                       % LOW_QTY_THRESHOLD),
         ("差异口径", "单价差异 = 本单单价 − 历史最低价；金额差异 = 单价差异 × 数量；差异率 = 单价差异 / 历史最低价"),
         ("金额汇总", "本单金额合计 %.2f 元；应有金额合计（最低价×数量）%.2f 元；超付 %.2f 元、少付 %.2f 元"
          % (summary["amount"]["bill_total"], summary["amount"]["should_total"],

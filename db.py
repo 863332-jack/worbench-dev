@@ -689,7 +689,7 @@ def _rebuild_price_index_conn(conn):
     """在既有事务/连接内重建型号价格基准（供应商+型号）。返回基准条数。"""
     conn.execute("DELETE FROM price_index")
     rows = conn.execute(
-        """SELECT supplier, model, model_norm, material, size, unit_price, period, exclude_reason
+        """SELECT supplier, model, model_norm, material, size, unit_price, period, quantity, exclude_reason
            FROM hist_price ORDER BY supplier, model_norm, id"""
     ).fetchall()
 
@@ -704,12 +704,13 @@ def _rebuild_price_index_conn(conn):
         if r["exclude_reason"]:
             g["excluded"].append((r["period"], r["exclude_reason"]))
         else:
-            g["prices"].append((r["period"], r["unit_price"]))
+            # 数量一并进明细：matcher 需要用它判断「低价是否只出现在小批量订单上」
+            g["prices"].append((r["period"], r["unit_price"], r["quantity"]))
 
     import re
     for (supplier, norm), g in groups.items():
-        prices = [(p, v) for p, v in g["prices"] if v is not None and v > 0]
-        levels = sorted(set(round(v, 4) for _, v in prices))
+        prices = [(p, v, q) for p, v, q in g["prices"] if v is not None and v > 0]
+        levels = sorted(set(round(v, 4) for _, v, _ in prices))
         min_price = min(levels) if levels else None
         # 最新价：按 period 月份取最大
         def period_key(pv):
@@ -717,7 +718,7 @@ def _rebuild_price_index_conn(conn):
             m = re.search(r"(\d{4})[^\d]*(\d{1,2})", p)
             return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
         latest = max(prices, key=period_key)[1] if prices else None
-        detail = [{"period": p or "", "price": v} for p, v in prices]
+        detail = [{"period": p or "", "price": v, "quantity": q} for p, v, q in prices]
         risk = 1 if len(levels) >= 2 else 0
         conn.execute(
             """INSERT INTO price_index

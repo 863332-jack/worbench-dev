@@ -454,6 +454,30 @@ def main():
     wb2 = load_workbook(os.path.join(TMP, "bk_result.xlsx"))
     check("结果 Excel 含「差异汇总」工作表", "差异汇总" in wb2.sheetnames, str(wb2.sheetnames))
 
+    print("== 14b. 低数量匹配转人工核实（数量 <20 视为打样/小批量价） ==")
+    # BK-1 历史：2027-01 数量 10、单价 4；BK-3 历史：2027-02 数量 20、单价 3
+    b3 = [["杰盛", "2027-04-10", "BK-1", "8*8", "铜", 100, 4, 400, ""],   # 单价全等，但历史仅 10 件
+          ["云锦", "2027-04-10", "BK-3", "", "塑料", 100, 3, 300, ""]]    # 历史 20 件，边界不触发
+    f_b3 = make_xlsx(os.path.join(TMP, "bk_lowqty.xlsx"), b3)
+    r = s.post(BASE + "/api/reconcile", files={"files": open(f_b3, "rb")}, timeout=30).json()
+    c = r.get("counts", {})
+    check("历史 10 件→需人工复核 / 历史 20 件→已匹配最低价",
+          c.get("matched") == 1 and c.get("review") == 1, str(c))
+    no3 = r["batches"][0]["recon_no"]
+    res3 = s.get(BASE + "/api/results/" + no3, timeout=20).json()
+    low = [x for x in res3["results"] if x["model"] == "BK-1"][0]
+    edge = [x for x in res3["results"] if x["model"] == "BK-3"][0]
+    check("低数量行标「历史数量偏少」并说明打样/小批量价",
+          "low_qty" in (low.get("diff_types") or "") and "打样" in (low.get("reason") or ""),
+          str(low)[:200])
+    check("边界值 20 件不误判（仍为已匹配最低价）",
+          edge.get("status") == "matched_lowest", str(edge.get("status")))
+    codes3 = {d["code"] for d in (res3.get("summary") or {}).get("by_diff", [])}
+    check("差异汇总出现 low_qty（历史数量偏少）", "low_qty" in codes3, str(codes3))
+    rf3 = s.get(BASE + "/api/results/%s?diff=low_qty" % no3, timeout=20).json()
+    check("可按该差异类型筛选（只返回 1 条）", len(rf3.get("results", [])) == 1,
+          str(len(rf3.get("results", []))))
+
     print("== 15. 发货明细完整入库（v2 去重：时间与内容全部参与） ==")
     det_rows = [["云锦", "2027-05-05", "DET-1", "", "铜", 10, 5, 50, ""],
                 ["云锦", "2027-05-05", "DET-1", "", "铜", 20, 5, 100, ""],  # 同日同价、数量不同

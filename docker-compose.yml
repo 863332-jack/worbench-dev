@@ -13,7 +13,7 @@ services:
     build:
       context: ./app
       dockerfile: Dockerfile
-    image: recon-system:1.1.0
+    image: recon-system:1.2.0
     container_name: recon-system
     restart: unless-stopped
     # 停止时给进行中的 Excel 导出一段时间写完，避免半截文件
@@ -24,7 +24,7 @@ services:
     environment:
       TZ: Asia/Shanghai
       # 版本号：改完代码重建后，用它确认 NAS 上跑的确实是新版本（见 /api/status）
-      RECON_VERSION: "1.1.0"
+      RECON_VERSION: "1.2.0"
       # 管理员密码从 .env 读取。
       # 用 :? 语法：.env 缺这个变量时 compose 直接报错，而不是悄悄回退到代码内置的旧密码。
       RECON_ADMIN_PASSWORD: ${RECON_ADMIN_PASSWORD:?请先在 .env 中设置 RECON_ADMIN_PASSWORD}

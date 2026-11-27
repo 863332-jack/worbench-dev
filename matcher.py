@@ -7,6 +7,11 @@
    命中只作参考，状态强制为「需人工复核」，绝不自动判定为最低价；
 3. 未命中：标「无历史记录」。
 
+低数量复核（`DIFF_LOW_QTY`）：
+单价虽与历史最低价完全一致，但「等于最低价的历史订单」数量最多仍小于 `LOW_QTY_THRESHOLD`（默认 20）时，
+不判定为「已匹配最低价」，改判「需人工复核」。理由是数量过少的订单通常是打样/小批量试做价，
+不代表批量做货价；这种「低价」不足以证明批量采购能拿到同样价格。
+
 差异口径（本次新增，见 config.DIFF_*）：
 - 单价差异 price_gap = 本单单价 − 历史最低价；差异率 gap_rate = 差额 / 最低价；
 - 金额差异 amount_gap = 单价差异 × 数量（数量缺失则为空）；
@@ -19,7 +24,7 @@ from config import (
     STATUS_NO_HISTORY, STATUS_PARSE_ERROR,
     DIFF_AMT_HIGH, DIFF_AMT_LOW, DIFF_NO_HIST, DIFF_PARSE_ERR, DIFF_MULTI_LEVEL,
     DIFF_DATE_BEFORE, DIFF_BASE_STALE, DIFF_DATE_MISSING, DIFF_NEAR_MODEL,
-    BASE_STALE_MONTHS,
+    DIFF_LOW_QTY, BASE_STALE_MONTHS, LOW_QTY_THRESHOLD,
 )
 from parsers import model_key
 import db
@@ -57,6 +62,39 @@ def lowest_period(detail, lowest):
                if d.get("period") and d.get("price") is not None
                and abs(float(d["price"]) - float(lowest)) < EPS]
     return max(periods) if periods else ""
+
+
+def _lowest_qty(detail, lowest):
+    """历史最低价对应订单的数量统计，返回 (最大数量, 有数量的笔数, 缺数量的笔数)。
+
+    只统计「单价等于最低价」的那些历史记录：判断重点是——支撑这个低价的订单有多少量。
+    最大数量给「是否有一笔达到批量」用；缺失数量的笔数用于说明结论的可信范围
+    （数量未知时不触发复核，避免把历史缺数量的正常数据全部打成异常）。
+    """
+    if lowest is None or not detail:
+        return None, 0, 0
+    qs, missing = [], 0
+    for d in detail:
+        p = d.get("price")
+        if p is None:
+            continue
+        try:
+            if abs(float(p) - float(lowest)) >= EPS:
+                continue
+        except (TypeError, ValueError):
+            continue
+        q = d.get("quantity")
+        if q in (None, ""):
+            missing += 1
+            continue
+        try:
+            q = float(q)
+        except (TypeError, ValueError):
+            missing += 1
+            continue
+        if q > 0:
+            qs.append(q)
+    return (max(qs) if qs else None), len(qs), missing
 
 
 def _date_diffs(bill_period, hist_period):
@@ -202,8 +240,21 @@ def match_one(row, idx_map, key_index=None):
                       "型号未精确命中，已按近似型号比价，需确认是否同一物料",
                       "；".join(x for x in (near_note, codes_note) if x))
 
-    # 已匹配最低价
+    # 已匹配最低价（含低数量复核：全等但历史量太小仍不放过）
     if bill is not None and lowest is not None and abs(bill - lowest) < EPS:
+        max_q, n_q, n_missing = _lowest_qty(detail, lowest)
+        miss_note = ("，另有 %d 笔数量缺失未计入" % n_missing) if n_missing else ""
+        if max_q is not None:
+            qty_note = "最低价对应历史订单数量最多 %g%s" % (max_q, "（%d 笔）" % n_q if n_q > 1 else "")
+            base["evidence"] = (base["evidence"] + "；" + qty_note) if base["evidence"] else qty_note
+            # 数量过少：低价很可能来自打样/小批量，不能算「已匹配最低价」
+            if LOW_QTY_THRESHOLD > 0 and max_q < LOW_QTY_THRESHOLD:
+                return finish(
+                    STATUS_NEEDS_REVIEW, codes + [DIFF_LOW_QTY],
+                    "单价与历史最低价 %s 一致，但该价位的历史订单数量最多仅 %g%s（低于 %d），"
+                    "可能是打样/小批量价格而非批量做货价，需人工确认价格类型及账单金额是否正确"
+                    % (_fmt_price(lowest), max_q, miss_note, LOW_QTY_THRESHOLD),
+                    codes_note)
         return finish(STATUS_MATCHED_LOWEST, codes, "", codes_note)
 
     # 低于历史最低价

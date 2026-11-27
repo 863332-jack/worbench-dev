@@ -104,6 +104,7 @@
 | 4 | `RECON_RETENTION_DAYS` | 90 | **按对账周期定**：能支撑季度复查 → 建议 180 | 改 `.env` 后重建 |
 | 5 | `RECON_DAILY_BACKUP` | 1（开） | 保持开，`RECON_BACKUP_KEEP=10` | 备份落在 `storage/data/backups/`，约 0.75 MB/份 |
 | 6 | `RECON_SQLITE_FAST` | 0 | 保持 0 | 只有导入大文件明显卡时才考虑改 1 |
+| 6b | `RECON_LOW_QTY_THRESHOLD` | 20（件） | 先按 20 观察一轮 | 单价全等但历史订单量 < 该值时转「需人工复核」（疑打样价）。改 `.env` 后**重建项目**；设 0 关闭 |
 | 7 | 异常处理后怎么通知人 | 无 | 建议加：DSM「通知」里把 Container Manager 的容器停止事件打开 | 控制面板 → 通知 → 规则，勾选 Docker/容器相关 |
 | 8 | 是否对公网开放 | 仅局域网 | **不要开**（无 HTTPS、Flask 开发服务器、密码单因子） | 必须外网时走 VPN 或加 nginx + HTTPS |
 

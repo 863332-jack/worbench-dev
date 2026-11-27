@@ -41,7 +41,7 @@ def _env_int(name, default):
 
 # 版本号：会出现在 /api/status 与启动横幅里。
 # 用途：改完代码重建镜像后，用它确认 NAS 上跑的确实是新版本（避免"以为改了其实没生效"）。
-APP_VERSION = os.environ.get("RECON_VERSION", "1.1.0")
+APP_VERSION = os.environ.get("RECON_VERSION", "1.2.0")
 
 # 上传原件/导出结果保留天数（启动时 + 每日维护时清理）
 UPLOAD_RETENTION_DAYS = _env_int("RECON_RETENTION_DAYS", 90)
@@ -94,6 +94,7 @@ DIFF_DATE_BEFORE = "date_before"    # 账单月份早于基准月份（用后来
 DIFF_BASE_STALE = "base_stale"      # 基准过期：历史最低价距账单月太久，价格可能已失效
 DIFF_DATE_MISSING = "date_missing"  # 月份缺失，无法判断时效
 DIFF_NEAR_MODEL = "near_model"      # 型号近似匹配（忽略符号差异后命中，需确认是否同一物料）
+DIFF_LOW_QTY = "low_qty"            # 全等匹配但历史订单数量过少（疑打样价/小批量价，非批量做货价）
 
 DIFF_LABELS = {
     DIFF_AMT_HIGH: "金额偏高",
@@ -105,13 +106,21 @@ DIFF_LABELS = {
     DIFF_BASE_STALE: "基准过期",
     DIFF_DATE_MISSING: "月份缺失",
     DIFF_NEAR_MODEL: "型号近似匹配",
+    DIFF_LOW_QTY: "历史数量偏少",
 }
 # 需要人工处理的差异类型（用于「异常项」汇总与筛选）
 DIFF_ATTENTION = (DIFF_AMT_HIGH, DIFF_AMT_LOW, DIFF_NO_HIST, DIFF_PARSE_ERR,
                   DIFF_MULTI_LEVEL, DIFF_DATE_BEFORE, DIFF_BASE_STALE,
-                  DIFF_DATE_MISSING, DIFF_NEAR_MODEL)
+                  DIFF_DATE_MISSING, DIFF_NEAR_MODEL, DIFF_LOW_QTY)
 
 # 基准过期阈值（月）：历史最低价距本单账单月超过该月数，提示价格可能失效
 BASE_STALE_MONTHS = 6
+# 低数量复核阈值（件）：单价与历史最低价完全一致，但该价位的历史订单数量最多仍小于该值时，
+# 不判定为「已匹配最低价」，转「需人工复核」。
+# 原因：数量过少的订单很可能按打样价/小批量价成交，单价天然高于批量做货价；
+# 反过来，若一个「低价」只出现在极小批量的订单上，它并不能证明批量采购能拿到该价格。
+# 判定取「等于最低价的那些历史记录」中的最大数量：只要其中有一笔达到阈值，即认为该低价经过批量验证。
+# 可用环境变量 RECON_LOW_QTY_THRESHOLD 覆盖；设 0 可关闭该规则。
+LOW_QTY_THRESHOLD = _env_int("RECON_LOW_QTY_THRESHOLD", 20)
 # 差异率展示精度（百分比小数位）
 GAP_RATE_DIGITS = 2
