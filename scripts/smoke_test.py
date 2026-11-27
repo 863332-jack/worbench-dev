@@ -316,6 +316,54 @@ def main():
           and 'id="foldSupHist"' not in page and 'id="shTable"' not in page,
           "len=%d" % len(page))
 
+    # --- 16c. 型号历史查询：所有用户可用、逐条明细、只读 ---
+    # 与上一个功能（管理员台账里的型号筛选）不同：这块在主页面始终渲染，不校验管理员会话。
+    check("非管理员：主页面渲染出型号查询框（所有用户可用）",
+          'id="msCard"' in page and 'id="msInput"' in page, "len=%d" % len(page))
+    n_before = s.get(BASE + "/api/status", timeout=20).json()["hist_rows"]
+    rq = s.get(BASE + "/api/history/search?model=BK-", timeout=20)
+    d = rq.json()
+    check("非管理员：型号历史查询接口可用（不要求管理员）",
+          rq.status_code == 200 and d.get("ok") is True and d.get("total", 0) >= 1,
+          "%s total=%s" % (rq.status_code, d.get("total")))
+    first = (d.get("rows") or [{}])[0]
+    check("结果含型号/记录标识/上传时间/状态等已有字段",
+          all(k in first for k in ("model", "supplier", "period", "unit_price", "quantity",
+                                   "batch_no", "record_id", "source_file", "source_row",
+                                   "uploaded_at", "status")), str(first)[:240])
+    check("返回的是逐条明细（总数=明细条数，不是聚合行）",
+          len(d["rows"]) == d["total"] and all(x.get("model") for x in d["rows"]),
+          "%d 行 / total %d" % (len(d["rows"]), d["total"]))
+    check("状态与有效口径一致（有效行必有正单价）",
+          all(x["status"] == "有效" for x in d["rows"] if (x.get("unit_price") or 0) > 0
+              and not x.get("exclude_reason")), str([x["status"] for x in d["rows"]])[:160])
+    rq_low = s.get(BASE + "/api/history/search?model=bk-", timeout=20).json()
+    check("型号查询：包含匹配且忽略大小写", rq_low["total"] == d["total"],
+          "%s vs %s" % (rq_low["total"], d["total"]))
+    rq_none = s.get(BASE + "/api/history/search?model=%E4%B8%8D%E5%AD%98%E5%9C%A8ZZZ",
+                    timeout=20).json()
+    check("型号查询：无匹配返回空结果且不报错",
+          rq_none.get("ok") is True and rq_none["total"] == 0 and rq_none["rows"] == [],
+          str(rq_none.get("total")))
+    rq_empty = s.get(BASE + "/api/history/search?model=", timeout=20).json()
+    check("型号查询：空关键字不返回全量（不泄露整库）",
+          rq_empty.get("ok") is True and rq_empty["total"] == 0, str(rq_empty.get("total")))
+    rq_wc = s.get(BASE + "/api/history/search?model=%25", timeout=20).json()
+    check("型号查询：通配符被转义（% 不当通配符用）", rq_wc["total"] == 0, str(rq_wc["total"]))
+    rq_long = s.get(BASE + "/api/history/search?model=" + "A" * 61, timeout=20)
+    check("型号查询：超长关键字被拒 400", rq_long.status_code == 400, str(rq_long.status_code))
+    rq_p = s.get(BASE + "/api/history/search?model=BK-&limit=2", timeout=20).json()
+    check("型号查询：分页 limit 生效并标记截断",
+          len(rq_p["rows"]) == 2 and rq_p["truncated"] is True and rq_p["total"] == d["total"],
+          "%d 行 truncated=%s" % (len(rq_p["rows"]), rq_p.get("truncated")))
+    rq_p2 = s.get(BASE + "/api/history/search?model=BK-&limit=2&offset=2", timeout=20).json()
+    check("型号查询：offset 翻页不重复",
+          not ({x["id"] for x in rq_p["rows"]} & {x["id"] for x in rq_p2["rows"]}),
+          str([x["id"] for x in rq_p["rows"]]) + " / " + str([x["id"] for x in rq_p2["rows"]]))
+    n_after = s.get(BASE + "/api/status", timeout=20).json()["hist_rows"]
+    check("型号历史查询全程只读（历史库行数不变）", n_before == n_after,
+          "%s → %s" % (n_before, n_after))
+
     # --- 管理员登录后可用 ---
     s.post(BASE + "/api/auth/login", json={"password": "13662566518"}, timeout=10)
     page = s.get(BASE + "/", timeout=20).text

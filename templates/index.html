@@ -58,6 +58,23 @@
       <div class="msg" id="histMsg"></div>
       <div class="report" id="histReport"></div>
     </div>
+    <!-- 型号历史查询：始终显示、所有用户可用，仅读不写；与管理员台账/批次模块彼此独立 -->
+    <div class="card" id="msCard">
+      <div class="card-head">
+        <div><h2>型号历史查询</h2>
+          <p class="muted">输入型号关键字即检索历史库中的逐条记录（含批次号、上传时间与状态），用于人工快速核对与审核；只查询，不修改任何数据。</p></div>
+        <div class="head-actions"><span class="tag">所有用户可用</span></div>
+      </div>
+      <div class="form-row">
+        <label>型号</label>
+        <input type="text" id="msInput" class="sh-model-input" maxlength="60"
+               autocomplete="off" spellcheck="false" placeholder="输入型号关键字，如 D409766 或 底座">
+        <button class="btn ghost small ms-clear" id="btnMsClear" hidden>清空</button>
+        <span class="muted">按型号包含匹配（忽略大小写/全半角/空格），输入即自动检索</span>
+      </div>
+      <div class="sh-hint" id="msHint" hidden></div>
+      <div class="ms-body" id="msBody"><div class="empty">输入型号关键字开始检索</div></div>
+    </div>
     {% if is_admin %}
     <div class="card">
       <details class="fold" id="foldBatches">

@@ -136,6 +136,16 @@ input[type=month]{ padding:8px 10px; border:1px solid var(--line); border-radius
 .sh-hit{ min-width:92px; }
 .sh-hit-names{ display:block; margin-top:2px; font-size:11px; color:var(--muted); }
 .sh-period{ white-space:nowrap; }
+/* 型号历史查询（主页面，所有用户可用）：中性标识、副行说明、浅色加载指示器 */
+.tag{ font-size:12px; font-weight:550; color:#455062; background:#f2f5fa;
+  border:1px solid var(--line); border-radius:999px; padding:3px 10px; white-space:nowrap; }
+.ms-sub{ display:block; margin-top:2px; font-size:11px; color:var(--muted); }
+.ms-clear{ padding:6px 10px; }
+.ms-body .empty{ line-height:1.9; }
+.ms-body .empty .muted{ font-size:12px; }
+.ms-kw{ font-weight:650; color:var(--primary); }
+.badge.warn{ background:#fff6e5; color:#b26a00; }
+.loading.dark{ border-color:var(--primary); border-top-color:transparent; }
 /* 供应商历史台账：状态标记 */
 .sh-status{ display:inline-block; padding:1px 8px; border-radius:9px; font-size:11px; white-space:nowrap; }
 .sh-new{ background:var(--green-bg); color:var(--green); }

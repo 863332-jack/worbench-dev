@@ -910,6 +910,82 @@ def list_history_batches():
     conn.close(); return [dict(r) for r in rows]
 
 
+def search_hist_prices(keyword, limit=200, offset=0):
+    """型号关键字 → 历史明细记录（只读，所有用户可用）。
+
+    与 list_supplier_history 的「按供应商×期间聚合的有效口径」不同：这里返回命中的
+    **逐条原始记录**（含被排除行），并带上批次号、来源文件/行号、上传时间与状态，
+    供人工对照审核。匹配口径与台账一致：normalize_model() 归一化后对 model_norm
+    做包含匹配；LIKE 通配符已转义，% 与 _ 只当普通字符。全程只读，不写库、不产生事件。
+    """
+    from parsers import normalize_model   # 延迟导入：入库与查询共用同一归一化函数
+    kw_raw = (keyword or "").strip()
+    kw = normalize_model(kw_raw)
+    empty = {"keyword": kw_raw, "norm": kw, "total": 0, "models": 0, "valid": 0,
+             "excluded": 0, "suppliers": [], "min_price": None, "max_price": None,
+             "rows": [], "limit": 0, "offset": 0, "truncated": False}
+    if not kw:
+        return empty
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 200
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        offset = 0
+    limit = max(1, min(limit, 500))
+    offset = max(0, offset)
+    like = "%" + _like_escape(kw) + "%"
+    conn = connect()
+    try:
+        agg = conn.execute(
+            """SELECT COUNT(*) AS total,
+                      COUNT(DISTINCT model_norm) AS models,
+                      COALESCE(SUM(CASE WHEN {v} THEN 1 ELSE 0 END), 0) AS valid,
+                      MIN(CASE WHEN {v} THEN unit_price END) AS min_price,
+                      MAX(CASE WHEN {v} THEN unit_price END) AS max_price
+               FROM hist_price WHERE model_norm LIKE ? ESCAPE '\\'""".format(v=VALID_COND),
+            (like,)).fetchone()
+        total = agg["total"] or 0
+        if not total:
+            empty["norm"] = kw
+            return empty
+        suppliers = [r["supplier"] for r in conn.execute(
+            """SELECT DISTINCT supplier FROM hist_price
+               WHERE model_norm LIKE ? ESCAPE '\\' ORDER BY supplier""", (like,))]
+        rows = [dict(r) for r in conn.execute(
+            """SELECT h.id, h.batch_no, h.supplier, h.model, h.period,
+                      h.unit_price, h.quantity, h.bill_date, h.source_file,
+                      h.source_row, h.exclude_reason, h.created_at,
+                      b.file_name AS batch_file, b.status AS batch_status,
+                      COALESCE(NULLIF(b.created_at, ''), h.created_at) AS uploaded_at
+               FROM hist_price h
+               LEFT JOIN import_batch b ON b.batch_no = h.batch_no
+               WHERE h.model_norm LIKE ? ESCAPE '\\'
+               ORDER BY uploaded_at DESC, h.id DESC
+               LIMIT ? OFFSET ?""", (like, limit, offset))]
+        for r in rows:
+            reason = (r.get("exclude_reason") or "").strip()
+            price = r.get("unit_price")
+            if reason:
+                r["status"], r["status_note"] = "已排除", reason
+            elif price is None or price <= 0:
+                r["status"], r["status_note"] = "待核价", "单价缺失或为 0"
+            else:
+                r["status"], r["status_note"] = "有效", ""
+            r["record_id"] = "%s · 第 %s 行" % (r["batch_no"] or "—", r["source_row"] or "—")
+        valid = agg["valid"] or 0
+        return {"keyword": kw_raw, "norm": kw, "total": total, "models": agg["models"] or 0,
+                "valid": valid, "excluded": total - valid,
+                "suppliers": suppliers,
+                "min_price": agg["min_price"], "max_price": agg["max_price"],
+                "rows": rows, "limit": limit, "offset": offset,
+                "truncated": total > offset + len(rows)}
+    finally:
+        conn.close()
+
+
 def get_price_index(supplier, model_norm):
     conn = connect()
     r = conn.execute("SELECT * FROM price_index WHERE supplier=? AND model_norm=?",

@@ -186,6 +186,103 @@ async function loadHistBatches(){
   }catch(e){ $('#histBatches').innerHTML='<div class="empty">批次加载失败，请刷新重试</div>'; if(cnt) cnt.textContent='加载失败'; }
 }
 
+// ===== 型号历史查询（主页面，所有用户可用；只读）=====
+// 与管理台账里的型号筛选相互独立：这里查的是 hist_price 逐条记录，
+// 命中口径同样是「型号包含匹配」，但结果带批次号/来源行/上传时间/状态，供人工核对。
+// 关键字只存在输入框与内存里，不用 localStorage/sessionStorage，也不写库。
+function msBadge(x){
+  if(x.status==='有效') return '<span class="badge ok">有效</span>';
+  if(x.status==='已排除') return '<span class="badge bad">已排除</span>'
+    +(x.status_note?`<span class="ms-sub">${esc(x.status_note)}</span>`:'');
+  return '<span class="badge warn">待核价</span>'
+    +(x.status_note?`<span class="ms-sub">${esc(x.status_note)}</span>`:'');
+}
+
+(function initModelSearch(){
+  const input=$('#msInput');
+  if(!input) return;                       // 非主页面或旧模板兜底
+  const body=$('#msBody'), hint=$('#msHint'), clearBtn=$('#btnMsClear');
+  const IDLE='<div class="empty">输入型号关键字开始检索</div>';
+  let timer=null, seq=0, lastKw='';        // seq：丢弃过期响应，避免慢请求覆盖新结果
+
+  function reset(){
+    if(timer){ clearTimeout(timer); timer=null; }
+    seq++; lastKw='';                      // 作废在途请求
+    hint.hidden=true; hint.innerHTML='';
+    if(clearBtn) clearBtn.hidden=true;
+    body.innerHTML=IDLE;
+  }
+  function showError(msg){
+    lastKw='';                             // 失败不记住关键字，回车/重输可重试
+    hint.hidden=true;
+    body.innerHTML=`<div class="empty"><span class="st-err">${esc(msg)}</span>
+      <div class="muted">请稍后重试，或刷新页面后再查</div></div>`;
+  }
+  function render(r, kw){
+    if(!r.total){
+      hint.hidden=true;
+      body.innerHTML=`<div class="empty">没有找到包含 <span class="ms-kw">${esc(kw)}</span> 的历史记录
+        <div class="muted">请检查型号拼写，或换用更短的关键字（如只输入型号前几位）</div></div>`;
+      return;
+    }
+    hint.hidden=false;
+    hint.innerHTML=`<span>型号包含 <span class="kw">${esc(kw)}</span> · 命中 <b>${r.total}</b> 条记录
+      （${r.models} 个型号 / ${r.suppliers.length} 家供应商）· 有效 ${r.valid} 条</span>`;
+    let h='<div class="statcards">'
+      +`<div class="stat"><div class="n">${r.total}</div><div class="l">命中记录</div>
+        <div class="hint">${r.models} 个不同型号</div></div>`
+      +`<div class="stat green"><div class="n">${r.valid}</div><div class="l">有效价记录</div>
+        <div class="hint">可参与价格比对</div></div>`
+      +`<div class="stat gray"><div class="n">${r.excluded}</div><div class="l">已排除 / 待核价</div>
+        <div class="hint">空价或待核价行</div></div>`
+      +`<div class="stat"><div class="n">${r.suppliers.length}</div><div class="l">供应商</div>
+        <div class="hint">${esc(r.suppliers.slice(0,4).join('、'))}${r.suppliers.length>4?' …':''}</div></div>`
+      +'</div>';
+    if(r.truncated) h+=`<div class="detail-note">共 ${r.total} 条，当前显示前 ${r.rows.length} 条；请补充关键字缩小范围。</div>`;
+    h+='<div class="tablewrap"><table><thead><tr><th>型号</th><th>供应商</th><th>期间</th><th>单价</th>'
+      +'<th>数量</th><th>状态</th><th>记录标识</th><th>上传时间</th></tr></thead><tbody>';
+    r.rows.forEach(x=>{
+      const q=(x.quantity===null||x.quantity===undefined)?'—':Number(x.quantity).toLocaleString();
+      h+=`<tr><td><b>${esc(x.model)}</b></td><td>${esc(x.supplier)}</td>
+        <td class="sh-period">${esc(x.period||'—')}</td><td>${money(x.unit_price)}</td><td>${q}</td>
+        <td>${msBadge(x)}</td>
+        <td>${esc(x.batch_no||'—')}<span class="ms-sub">${esc(x.source_file||'—')} · 第 ${esc(x.source_row||'—')} 行</span></td>
+        <td>${esc(x.uploaded_at||'—')}</td></tr>`;
+    });
+    body.innerHTML=h+'</tbody></table></div>';
+  }
+  async function run(kw){
+    if(!kw){ reset(); return; }         // 空关键字不回服务端（也避免出现"没有找到包含空"）
+    if(kw===lastKw) return;                // 关键字没变不重复请求
+    lastKw=kw;
+    const my=++seq;
+    hint.hidden=true;
+    body.innerHTML='<div class="empty"><span class="loading dark"></span>正在检索…</div>';
+    try{
+      const r=await fetch('/api/history/search?model='+encodeURIComponent(kw)).then(x=>x.json());
+      if(my!==seq) return;                 // 已有更新的检索，丢弃本次结果
+      if(!r.ok){ showError(r.error||'检索失败'); return; }
+      render(r, kw);
+    }catch(e){
+      if(my!==seq) return;
+      showError('请求失败：'+e.message);
+    }
+  }
+  function schedule(){
+    const kw=input.value.trim();
+    if(clearBtn) clearBtn.hidden=!kw;
+    if(timer){ clearTimeout(timer); timer=null; }
+    if(!kw){ reset(); return; }
+    timer=setTimeout(()=>{ timer=null; run(kw); },280);
+  }
+  input.addEventListener('input',schedule);
+  input.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){ e.preventDefault(); if(timer){ clearTimeout(timer); timer=null; } run(input.value.trim()); }
+    else if(e.key==='Escape'){ input.value=''; reset(); }
+  });
+  if(clearBtn) clearBtn.addEventListener('click',()=>{ input.value=''; reset(); input.focus(); });
+})();
+
 // Reconcile
 $('#btnReconcile').addEventListener('click',async(ev)=>{
   const btn=ev.currentTarget;   // A-4 修复：同上

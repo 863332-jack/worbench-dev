@@ -319,6 +319,29 @@ def api_history_batches():
     return jsonify(ok=True, batches=db.list_history_batches())
 
 
+@app.route("/api/history/search")
+def api_history_search():
+    """型号关键字 → 历史明细（所有用户可用，只读）。
+
+    与管理员台账 `/api/suppliers/history` 的区别：这里不校验管理员会话、不返回聚合台账，
+    只按型号返回命中的原始记录（含批次号、上传时间、状态），用于人工快速核对。
+    """
+    model = (request.args.get("model") or "").strip()
+    if len(model) > 60:
+        return jsonify(ok=False, error="型号关键字最长 60 个字符"), 400
+    try:
+        limit = int(request.args.get("limit") or 200)
+        offset = int(request.args.get("offset") or 0)
+    except ValueError:
+        return jsonify(ok=False, error="分页参数必须是整数"), 400
+    try:
+        data = db.search_hist_prices(model, limit=limit, offset=offset)
+    except Exception as e:
+        log.exception("型号检索失败")
+        return jsonify(ok=False, error="检索失败：%s" % str(e)), 500
+    return jsonify(ok=True, **data)
+
+
 @app.route("/api/history/reset", methods=["POST"])
 def api_history_reset():
     # 后端强制校验清空权限：无权限直接拒绝，不执行任何清空
