@@ -182,6 +182,15 @@ def connect():
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=30000")
+    # --- 只影响性能、不改变持久化语义的几项 ---
+    # 每次请求都新建连接，默认 2MB 页缓存偏小；NAS 上一个核对批次会反复扫 price_index。
+    conn.execute("PRAGMA cache_size=-16000")        # 16MB 页缓存
+    conn.execute("PRAGMA temp_store=MEMORY")        # 排序/临时表走内存，不落盘
+    conn.execute("PRAGMA mmap_size=134217728")      # 128MB 内存映射读，减少 read() 系统调用
+    # synchronous 默认 FULL（最安全）。WAL 下改 NORMAL 可显著减少 fsync，
+    # 代价是断电/强杀时可能丢最后几笔已提交事务，因此做成开关、默认不开。
+    if os.environ.get("RECON_SQLITE_FAST", "0").strip().lower() in ("1", "true", "yes"):
+        conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 

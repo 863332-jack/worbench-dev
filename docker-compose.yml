@@ -13,16 +13,34 @@ services:
     build:
       context: ./app
       dockerfile: Dockerfile
-    image: recon-system:1.0.0
+    image: recon-system:1.1.0
     container_name: recon-system
     restart: unless-stopped
+    # 停止时给进行中的 Excel 导出一段时间写完，避免半截文件
+    stop_grace_period: 20s
     # 千万保持单副本：SQLite 以 WAL 模式运行，多个容器同时挂同一个库会锁冲突
     ports:
       - "5088:5088"
     environment:
       TZ: Asia/Shanghai
-      # 管理员密码从 .env 读取；留空则回退到代码内置默认值（不推荐）
-      RECON_ADMIN_PASSWORD: ${RECON_ADMIN_PASSWORD:-}
+      # 版本号：改完代码重建后，用它确认 NAS 上跑的确实是新版本（见 /api/status）
+      RECON_VERSION: "1.1.0"
+      # 管理员密码从 .env 读取。
+      # 用 :? 语法：.env 缺这个变量时 compose 直接报错，而不是悄悄回退到代码内置的旧密码。
+      RECON_ADMIN_PASSWORD: ${RECON_ADMIN_PASSWORD:?请先在 .env 中设置 RECON_ADMIN_PASSWORD}
+      # ---- 运维开关（都有合理默认值，按需开启）----
+      # 日志级别：排障时改 DEBUG 后重建容器
+      RECON_LOG_LEVEL: ${RECON_LOG_LEVEL:-INFO}
+      # 后台维护：每 N 小时清理一次超期文件（容器常驻才需要）
+      RECON_MAINTENANCE: ${RECON_MAINTENANCE:-1}
+      RECON_MAINTENANCE_HOURS: ${RECON_MAINTENANCE_HOURS:-24}
+      # 上传原件/导出结果保留天数
+      RECON_RETENTION_DAYS: ${RECON_RETENTION_DAYS:-90}
+      # 每日自动备份数据库（保留份数由 RECON_BACKUP_KEEP 控制）
+      RECON_DAILY_BACKUP: ${RECON_DAILY_BACKUP:-1}
+      RECON_BACKUP_KEEP: ${RECON_BACKUP_KEEP:-10}
+      # SQLite 提速开关：1 时 synchronous=NORMAL（少 fsync，断电可能丢最后几笔），默认保持最安全
+      RECON_SQLITE_FAST: ${RECON_SQLITE_FAST:-0}
     volumes:
       # 数据库（recon.db + backups/）
       - ./storage/data:/app/data
@@ -33,8 +51,13 @@ services:
       # 运行日志（排障第一现场）
       - ./storage/logs:/app/logs
     # 如需以非 root 运行（更安全，但要求宿主机目录属主匹配），取消下一行注释。
-    # 群晖 admin 账号通常是 1026:100，用 `id admin` 在 NAS 终端可确认。
+    # 注意：当前 storage/ 下已有文件属主是 root，改成非 root 前必须先 chown，否则启动即崩。
     # user: "1026:100"
+    # ---- 资源限制：NAS 上还有其他套件在跑，给个上限避免失控 ----
+    # 已实测该容器常驻内存约 60–90MB，峰值（并发解析 Excel）约 300MB，1G 上限足够宽松。
+    # 若 Container Manager 版本较旧不认 mem_limit，注释掉这两行即可，不影响启动。
+    mem_limit: 1g
+    cpus: "2.0"
     logging:
       driver: json-file
       options:

@@ -20,6 +20,7 @@ import time
 import shutil
 import secrets
 import logging
+import threading
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta
 
@@ -34,6 +35,8 @@ import backup
 import recon_stats
 
 app = Flask(__name__)
+# 进程启动时间：/api/status 与诊断接口据此算 uptime，判断容器是否发生过重启
+APP_START_TS = time.time()
 # 会话安全：HttpOnly 防 JS 读 cookie；SameSite=Lax 防跨站提交（管理员登录/清空等敏感操作）
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
@@ -90,7 +93,7 @@ def _setup_logging():
                              maxBytes=1024 * 1024, backupCount=5, encoding="utf-8")
     fh.setFormatter(fmt)
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(getattr(logging, config.LOG_LEVEL, logging.INFO))
     root.addHandler(fh)
     sh = logging.StreamHandler()
     sh.setFormatter(fmt)
@@ -208,6 +211,38 @@ def housekeeping():
                 pass
     if n:
         log.info("housekeeping: 已清理 %d 个超期文件/目录（保留 %d 天）", n, config.UPLOAD_RETENTION_DAYS)
+
+
+def _maintenance_loop():
+    """后台维护线程：周期性清理超期文件，并按天自动备份数据库。
+
+    为什么必须有：容器一旦常驻（NAS 上动辄几十天不重启），原来"只在启动时清理"
+    等于永远不清；而数据库备份原来只在"清空历史库"时才生成，生产库等于没有定期备份。
+    首次备份延迟一个周期再做，避免启动瞬间与建库争 IO。
+    """
+    # 下限 1 分钟：便于在测试环境把间隔调小验证，正常生产填 24 即可
+    interval = max(1.0 / 60, config.MAINTENANCE_INTERVAL_HOURS) * 3600
+    while True:
+        time.sleep(interval)
+        try:
+            housekeeping()
+        except Exception:
+            log.exception("维护任务失败：超期文件清理")
+        if config.DAILY_BACKUP:
+            try:
+                path = db.backup_db("auto")
+                log.info("维护任务：数据库已自动备份 -> %s", os.path.basename(path))
+            except Exception:
+                log.exception("维护任务失败：自动备份")
+
+
+if config.MAINTENANCE_ENABLED:
+    threading.Thread(target=_maintenance_loop, name="maintenance", daemon=True).start()
+    _iv = config.MAINTENANCE_INTERVAL_HOURS
+    log.info("后台维护已启用：每 %s 清理超期文件（保留 %d 天）%s",
+             ("%.0f 分钟" % (_iv * 60)) if _iv < 1 else ("%.1f 小时" % _iv),
+             config.UPLOAD_RETENTION_DAYS,
+             "，并每日自动备份数据库" if config.DAILY_BACKUP else "")
 
 
 @app.route("/")
@@ -667,10 +702,124 @@ def api_download(recon_no):
     return send_file(path, as_attachment=True, download_name=os.path.basename(path))
 
 
+def _mb(path):
+    """文件大小（MB，两位小数）；不存在返回 0.0。"""
+    try:
+        return round(os.path.getsize(path) / 1048576.0, 2)
+    except OSError:
+        return 0.0
+
+
+def _dir_counts(path):
+    """目录下的子目录数 / 文件数；读不到返回 (-1, -1)。"""
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return -1, -1
+    dirs = files = 0
+    for n in names:
+        if os.path.isdir(os.path.join(path, n)):
+            dirs += 1
+        else:
+            files += 1
+    return dirs, files
+
+
 @app.route("/api/status")
 def api_status():
+    """健康检查 + 轻量运行指标。
+
+    字段只增不减：容器 healthcheck、冒烟测试都依赖 ok/hist_rows/idx_count，
+    新增字段（version/uptime/db_mb/wal_mb/writable）用于排查"服务活着但不对"的场景，
+    例如 WAL 膨胀、数据卷只读、跑的是旧镜像。
+    """
     hist_rows, idx_count = db.hist_count()
-    return jsonify(ok=True, hist_rows=hist_rows, idx_count=idx_count)
+    _out_dirs, out_files = _dir_counts(config.OUTPUT_DIR)
+    return jsonify(ok=True, hist_rows=hist_rows, idx_count=idx_count,
+                   version=config.APP_VERSION,
+                   uptime_sec=int(time.time() - APP_START_TS),
+                   db_mb=_mb(config.DB_PATH),
+                   wal_mb=_mb(config.DB_PATH + "-wal"),
+                   output_files=out_files,
+                   writable=(os.access(config.DATA_DIR, os.W_OK)
+                             and os.access(config.OUTPUT_DIR, os.W_OK)))
+
+
+@app.route("/api/admin/diagnostics")
+def api_admin_diagnostics():
+    """管理员诊断：一次拿到排障所需的路径/权限/库/备份/磁盘信息（仅管理员）。
+
+    没有 SSH 时这是唯一能看到"容器内部长什么样"的窗口，所以做成一屏可读。
+    """
+    denied = _require_admin_for_backup()
+    if denied:
+        return denied
+
+    import platform
+
+    paths = {}
+    for name, p in (("data", config.DATA_DIR), ("uploads", config.UPLOAD_DIR),
+                    ("outputs", config.OUTPUT_DIR), ("logs", config.LOG_DIR),
+                    ("backups", config.BACKUP_DIR)):
+        paths[name] = {"path": p, "exists": os.path.isdir(p), "writable": os.access(p, os.W_OK)}
+
+    db_info = {}
+    try:
+        conn = db.connect()
+        db_info = {
+            "journal_mode": conn.execute("PRAGMA journal_mode").fetchone()[0],
+            "page_count": conn.execute("PRAGMA page_count").fetchone()[0],
+            "freelist": conn.execute("PRAGMA freelist_count").fetchone()[0],
+            "size_mb": _mb(config.DB_PATH),
+            "wal_mb": _mb(config.DB_PATH + "-wal"),
+        }
+        conn.close()
+    except Exception as e:
+        db_info = {"error": str(e)}
+
+    backups = []
+    try:
+        for f in sorted(os.listdir(config.BACKUP_DIR)):
+            if f.endswith(".db"):
+                fp = os.path.join(config.BACKUP_DIR, f)
+                backups.append({"name": f, "mb": _mb(fp),
+                                "mtime": datetime.fromtimestamp(os.path.getmtime(fp))
+                                .strftime("%Y-%m-%d %H:%M:%S")})
+    except OSError:
+        pass
+
+    try:
+        du = shutil.disk_usage(config.DATA_DIR)
+        disk = {"total_gb": round(du.total / 1073741824.0, 1),
+                "free_gb": round(du.free / 1073741824.0, 1),
+                "used_pct": round(du.used * 100.0 / du.total, 1)}
+    except OSError:
+        disk = {}
+
+    up_stat = _dir_counts(config.UPLOAD_DIR)
+    out_stat = _dir_counts(config.OUTPUT_DIR)
+    return jsonify(ok=True, version=config.APP_VERSION,
+                   python=platform.python_version(),
+                   container=os.path.exists("/.dockerenv"),
+                   tz=os.environ.get("TZ", ""),
+                   now=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   uptime_sec=int(time.time() - APP_START_TS),
+                   paths=paths, db=db_info, disk=disk, backups=backups[-10:],
+                   pending={
+                       "upload_groups": up_stat[0],
+                       "upload_files": up_stat[1],
+                       "output_files": out_stat[1],
+                   },
+                   config={
+                       "retention_days": config.UPLOAD_RETENTION_DAYS,
+                       "backup_keep": config.BACKUP_KEEP,
+                       "maintenance": config.MAINTENANCE_ENABLED,
+                       "maintenance_hours": config.MAINTENANCE_INTERVAL_HOURS,
+                       "daily_backup": config.DAILY_BACKUP,
+                       "log_level": config.LOG_LEVEL,
+                       "admin_pwd_from_env": config.ADMIN_PASSWORD_FROM_ENV,
+                       "sqlite_fast": os.environ.get("RECON_SQLITE_FAST", "0"),
+                   })
 
 
 @app.errorhandler(413)
@@ -758,15 +907,18 @@ if __name__ == "__main__":
     # 容器里拿到的永远是 docker 内部地址，打印出来只会误导人
     in_docker = os.path.exists("/.dockerenv")
     print("=" * 60)
-    print("账单核对系统已启动（监听 0.0.0.0:5088）")
+    print("账单核对系统 v%s 已启动（监听 0.0.0.0:5088）" % config.APP_VERSION)
     if in_docker:
         print("  运行环境:    Docker 容器")
         print("  访问方式:    http://NAS的IP:映射端口（如 http://192.168.8.10:5088）")
     else:
         print("  本机访问:    http://127.0.0.1:5088")
         print("  局域网访问:  http://%s:5088" % ip)
-    print("  日志文件:    logs/app.log")
-    print("  自动备份:    data/backups/（清空历史库前自动备份）")
+    print("  日志文件:    logs/app.log（轮转 1MB×5，级别 %s）" % config.LOG_LEVEL)
+    print("  自动备份:    data/backups/（清空前备份%s）"
+          % ("，且每日自动备份一份" if config.DAILY_BACKUP else ""))
+    print("  文件保留:    uploads/outputs 超 %d 天自动清理（每 %.0f 小时检查一次）"
+          % (config.UPLOAD_RETENTION_DAYS, config.MAINTENANCE_INTERVAL_HOURS))
     if not config.ADMIN_PASSWORD_FROM_ENV:
         print("  " + "-" * 56)
         print("  ⚠ 安全提示：未设置环境变量 RECON_ADMIN_PASSWORD，")

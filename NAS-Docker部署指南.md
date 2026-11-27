@@ -7,7 +7,12 @@
 
 ## 一、部署后的目录结构
 
-在 NAS 上最终长这样（全部位于 `/volume1/docker/recon`）：
+> **路径以实际卷号为准**：下文统一写 `/volume1/docker/recon`，但 `docker` 共享文件夹
+> 落在哪个存储卷取决于建共享时的选择。**本机实测在 `/volume3`**，即
+> `/volume3/docker/recon`。在 File Station 里右键 `docker` 共享 →「属性」可以看到
+> 「位置」。看错卷号是排查"改了文件却没生效"的第一大原因——容器挂的是另一个卷。
+
+在 NAS 上最终长这样（示例按 `/volume1` 写，实际请替换为你的卷号）：
 
 ```
 /volume1/docker/recon/

@@ -25,11 +25,37 @@ ADMIN_PASSWORD_FROM_ENV = bool(os.environ.get("RECON_ADMIN_PASSWORD"))
 LOGIN_LOCK_AFTER = 5
 LOGIN_LOCK_SECONDS = 600
 
-# ---------- 运维配置 ----------
-# 上传原件/导出结果保留天数（启动时清理超期文件）
-UPLOAD_RETENTION_DAYS = 90
+# ---------- 运维配置（全部可用环境变量覆盖，便于容器部署时调节而不改代码） ----------
+def _env_flag(name, default="1"):
+    """把环境变量解析成布尔：0/false/no/off/空 视为关闭。"""
+    v = os.environ.get(name, default)
+    return str(v).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+def _env_int(name, default):
+    try:
+        return int(str(os.environ.get(name, default)).strip())
+    except (TypeError, ValueError):
+        return int(default)
+
+
+# 版本号：会出现在 /api/status 与启动横幅里。
+# 用途：改完代码重建镜像后，用它确认 NAS 上跑的确实是新版本（避免"以为改了其实没生效"）。
+APP_VERSION = os.environ.get("RECON_VERSION", "1.1.0")
+
+# 上传原件/导出结果保留天数（启动时 + 每日维护时清理）
+UPLOAD_RETENTION_DAYS = _env_int("RECON_RETENTION_DAYS", 90)
 # 数据库自动备份保留份数
-BACKUP_KEEP = 10
+BACKUP_KEEP = _env_int("RECON_BACKUP_KEEP", 10)
+
+# 后台维护线程：容器会连续运行数月不重启，只在启动时清理会导致超期文件永久堆积。
+MAINTENANCE_ENABLED = _env_flag("RECON_MAINTENANCE", "1")
+MAINTENANCE_INTERVAL_HOURS = float(os.environ.get("RECON_MAINTENANCE_HOURS", "24") or 24)
+# 每日自动备份数据库（与清空前的备份共用 data/backups/ 目录，按 BACKUP_KEEP 轮转）
+DAILY_BACKUP = _env_flag("RECON_DAILY_BACKUP", "1")
+
+# 日志级别：常规 INFO；排障时设 RECON_LOG_LEVEL=DEBUG 并重启容器
+LOG_LEVEL = os.environ.get("RECON_LOG_LEVEL", "INFO").upper()
 
 # 供应商初始种子 (名称, 别名)：仅首次建库/升级时写入 supplier 表。
 # 之后供应商一律以数据库为准，可在页面「供应商管理」中新增；这里不再作为校验白名单。
