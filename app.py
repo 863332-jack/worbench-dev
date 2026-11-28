@@ -709,7 +709,7 @@ def api_reconcile():
 
     # === 阶段二：逐文件核对并单事务入库（单文件失败即回滚该批次，不影响其它文件） ===
     batches, all_counts = [], {"total": 0, "matched": 0, "review": 0, "above": 0,
-                               "nohistory": 0, "error": 0, "diff": 0,
+                               "nohistory": 0, "error": 0, "pending": 0, "diff": 0,
                                "overpay": 0.0, "underpay": 0.0}
     for fname, review in staged:
         recon_no = db.new_no("R")
@@ -738,15 +738,17 @@ def api_reconcile():
                         "total_rows": counts["total"], "matched": counts["matched"],
                         "review": counts["review"], "above": counts["above"],
                         "nohistory": counts["nohistory"], "error": counts["error"],
+                        "pending": counts["pending"],
                         "diff": counts["diff"], "overpay": counts["overpay"],
                         "underpay": counts["underpay"]})
-        log.info("核对完成：%s 批次 %s 总 %d / 匹配 %d / 复核 %d / 高于 %d / 无历史 %d / 解析失败 %d / 差异 %d 笔 超付 %.2f",
+        log.info("核对完成：%s 批次 %s 总 %d / 匹配 %d / 复核 %d / 高于 %d / 无历史 %d / 待核价 %d / 解析失败 %d / 差异 %d 笔 超付 %.2f",
                  fname, recon_no, counts["total"], counts["matched"], counts["review"],
-                 counts["above"], counts["nohistory"], counts["error"], counts["diff"],
-                 counts["overpay"])
+                 counts["above"], counts["nohistory"], counts["pending"], counts["error"],
+                 counts["diff"], counts["overpay"])
 
+    # total_results 只算行数：all_counts 里还混着超付/少付金额，直接求和会把金额加进条数
     return jsonify(ok=True, batches=batches, counts=all_counts,
-                   total_results=sum(all_counts.values()), warnings=all_warnings)
+                   total_results=all_counts["total"], warnings=all_warnings)
 
 
 @app.route("/api/reconcile/batches")

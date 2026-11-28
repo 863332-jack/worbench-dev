@@ -5,6 +5,11 @@
 供应商 / 日期 / 型号 / 尺寸 / 材质 / 数量 / 单价 / 合计金额 / 备注
 带 * 为必填：供应商、日期、型号、单价。
 
+单价例外（仅 kind="pending"，即新账单核对）：
+新做配件常尚未核价，单价空着或写「待核价/待定/报价」。这类行**允许上传**，
+标记 pending_price=True 入库，核对时判为「待核价」且不参与本次比价；
+历史账单（kind="history"）仍要求单价必填，否则历史有效价库会被空价污染。
+
 错误对象统一字段：file, row, field, value, reason, cause
   reason = 具体问题；cause = 可能原因与修正建议
 """
@@ -104,6 +109,9 @@ def _header_diffs(rows):
 def validate_file(path, supplier_override="", kind="history"):
     fname = path.split("/")[-1]
     errors, warnings = [], []
+    # 只有「新账单核对」允许空价：历史账单是靠单价沉淀基准的，空价进去会污染最低价
+    allow_pending_price = (kind == "pending")
+    pending_rows = 0
 
     def err(row, field, value, reason, cause=""):
         errors.append({"file": fname, "row": row, "field": field,
@@ -209,14 +217,24 @@ def validate_file(path, supplier_override="", kind="history"):
         # 单价
         price_raw = parsers.cell_str(rec["单价"]).strip()
         price = None
+        pending_price = False
         if not price_raw:
-            err(excel_row, "单价", "", "必填项「单价」为空",
-                "可能漏填，或从原账单直接复制了空价行；单价必须为正数数字。")
-            row_ok = False
+            if allow_pending_price:
+                # 新配件尚未核价：放行，标记待核价，本次不参与比价
+                pending_price = True
+                pending_rows += 1
+            else:
+                err(excel_row, "单价", "", "必填项「单价」为空",
+                    "可能漏填，或从原账单直接复制了空价行；单价必须为正数数字。")
+                row_ok = False
         elif any(w.lower() in price_raw.lower() for w in EXCLUDE_WORDS):
-            err(excel_row, "单价", price_raw, "单价含「待核价/待定/报价」等排除标记，不允许录入",
-                "该行在原始账单中尚未核价；请先确认实际单价后填写数字，或删除该行。")
-            row_ok = False
+            if allow_pending_price:
+                pending_price = True
+                pending_rows += 1
+            else:
+                err(excel_row, "单价", price_raw, "单价含「待核价/待定/报价」等排除标记，不允许录入",
+                    "该行在原始账单中尚未核价；请先确认实际单价后填写数字，或删除该行。")
+                row_ok = False
         elif not NUM_RE.match(price_raw):
             err(excel_row, "单价", price_raw,
                 "单价格式错误，必须是正数数字（如 4 或 3.5），不能含文字/货币符号",
@@ -277,11 +295,16 @@ def validate_file(path, supplier_override="", kind="history"):
                 "material": parsers.cell_str(rec["材质"]).strip(),
                 "size": parsers.cell_str(rec["尺寸"]).strip(),
                 "quantity": qty, "total_amount": total, "unit_price": price,
+                "pending_price": pending_price,
                 "period": "%04d-%02d" % (d[0], d[1]) if d else "",
                 "date": "%04d-%02d-%02d" % d if d else "",
                 "remark": remark, "source_file": fname, "source_row": excel_row,
                 "raw_values": raw_values,
             })
+
+    if pending_rows:
+        warn(0, "单价", "", "本文件有 %d 行单价为空或标记「待核价」，已按「待核价」接收" % pending_rows,
+             "这些行本次不参与核对（不计入匹配/差异），补齐单价后重新上传该账单即按原流程核对。")
 
     if seen_example:
         warn(0, "示例行", "", "检测到模板示例行（备注含「示例」）已自动跳过，未录入系统",

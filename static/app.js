@@ -15,17 +15,18 @@ const BTN_RC_TEXT = '开始核对';
 
 const STATUS_LABEL = {
   matched_lowest:'已匹配最低价', needs_review:'需人工复核', above_lowest:'高于历史最低价',
-  no_history:'无历史记录', parse_error:'解析失败'
+  no_history:'无历史记录', parse_error:'解析失败', pending_price:'待核价（未参与核对）'
 };
 const STATUS_CLS = {
   matched_lowest:'st-match', needs_review:'st-review', above_lowest:'st-above',
-  no_history:'st-review', parse_error:'st-err'
+  no_history:'st-review', parse_error:'st-err', pending_price:'st-pending'
 };
 // 差异类型标签（由 /api/results 的 summary.by_diff 覆盖补全，这里给静态兜底）
 const DIFF_LABEL = {
   amt_high:'金额偏高', amt_low:'金额偏低', no_hist:'无历史基准', parse_err:'单价无法解析',
   multi_level:'多档价待定', date_before:'日期早于基准', base_stale:'基准过期',
-  date_missing:'月份缺失', near_model:'型号近似匹配', low_qty:'历史数量偏少'
+  date_missing:'月份缺失', near_model:'型号近似匹配', low_qty:'历史数量偏少',
+  pending_price:'待后期核价'
 };
 
 function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show');
@@ -303,7 +304,7 @@ $('#btnReconcile').addEventListener('click',async(ev)=>{
     r.batches.forEach(b=>{
       if(b.ok) html+=`<div class="report-item"><div class="rhead">✓ ${esc(b.file)} <span class="badge ok">核对完成</span></div>
         <div class="muted">批次 ${esc(b.recon_no)} · 总 ${b.total_rows} · <span style="color:var(--green)">已匹配最低价 ${b.matched}</span> ·
-        <span style="color:var(--orange)">需复核 ${b.review+b.nohistory+b.error}</span> · 高于最低 ${b.above}</div></div>`;
+        <span style="color:var(--orange)">需复核 ${b.review+b.nohistory+b.error}</span> · 高于最低 ${b.above}${b.pending?` · <span style="color:var(--muted)">待核价 ${b.pending}（未参与核对）</span>`:''}</div></div>`;
       else html+=`<div class="report-item bad"><div class="rhead">✕ ${esc(b.file)}</div><div>${esc(b.error)}</div></div>`;
     });
     $('#rcReport').innerHTML=html;
@@ -321,9 +322,9 @@ async function loadRcBatches(){
     const r=await fetch('/api/reconcile/batches').then(x=>x.json());
     const el=$('#rcBatches');
     if(!r.batches.length){ el.innerHTML='<div class="empty">暂无核对批次</div>'; return; }
-    let h='<table><thead><tr><th>批次号</th><th>文件</th><th>总行</th><th>已匹配最低</th><th>需复核</th><th>高于最低</th><th>无历史</th><th>解析失败</th><th>时间</th></tr></thead><tbody>';
+    let h='<table><thead><tr><th>批次号</th><th>文件</th><th>总行</th><th>已匹配最低</th><th>需复核</th><th>高于最低</th><th>无历史</th><th>解析失败</th><th>待核价</th><th>时间</th></tr></thead><tbody>';
     r.batches.forEach(b=>{ h+=`<tr><td>${esc(b.recon_no)}</td><td>${esc(b.file_name)}</td><td>${b.total_rows}</td>
-      <td>${b.n_matched}</td><td>${b.n_review}</td><td>${b.n_above}</td><td>${b.n_nohistory}</td><td>${b.n_error}</td><td>${esc(b.created_at)}</td></tr>`; });
+      <td>${b.n_matched}</td><td>${b.n_review}</td><td>${b.n_above}</td><td>${b.n_nohistory}</td><td>${b.n_error}</td><td>${b.n_pending||0}</td><td>${esc(b.created_at)}</td></tr>`; });
     el.innerHTML=h+'</tbody></table>';
   }catch(e){ $('#rcBatches').innerHTML='<div class="empty">批次加载失败，请刷新重试</div>'; }
 }
@@ -364,12 +365,14 @@ async function loadResults(){
     if(!r.ok){ $('#resultTable').innerHTML='<div class="empty">加载失败</div>'; return; }
     const b=r.batch, s=r.summary||{}, amt=s.amount||{};
     (s.by_diff||[]).forEach(d=>{ DIFF_LABEL[d.code]=d.label; });
-    // 状态统计（整批口径，不随筛选变化）
+    // 状态统计（整批口径，不随筛选变化）；待核价只在有数据时出现，避免空卡干扰
     $('#resultStats').innerHTML=`
       <div class="stat"><div class="n">${b.total_rows}</div><div class="l">总记录</div></div>
       <div class="stat green"><div class="n">${b.n_matched}</div><div class="l">已匹配最低价</div></div>
       <div class="stat orange"><div class="n">${b.n_review+b.n_nohistory+b.n_error}</div><div class="l">需人工复核</div></div>
-      <div class="stat yellow"><div class="n">${b.n_above}</div><div class="l">高于历史最低价</div></div>`;
+      <div class="stat yellow"><div class="n">${b.n_above}</div><div class="l">高于历史最低价</div></div>`
+      + (b.n_pending?`<div class="stat"><div class="n" style="color:var(--muted)">${b.n_pending}</div><div class="l">待核价</div>
+        <div class="hint">单价未定，本次未参与核对</div></div>`:'');
     // 金额统计（智能对账）
     $('#resultAmounts').innerHTML=`
       <div class="stat"><div class="n">${money(amt.bill_total)}</div><div class="l">本单金额合计</div>

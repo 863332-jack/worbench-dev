@@ -10,12 +10,12 @@
 """
 from config import (
     STATUS_LABELS, STATUS_MATCHED_LOWEST, STATUS_NEEDS_REVIEW, STATUS_ABOVE_LOWEST,
-    STATUS_NO_HISTORY, STATUS_PARSE_ERROR, DIFF_LABELS,
+    STATUS_NO_HISTORY, STATUS_PARSE_ERROR, STATUS_PENDING_PRICE, DIFF_LABELS,
 )
 
 EPS = 0.0001
 STATUS_ORDER = (STATUS_MATCHED_LOWEST, STATUS_NEEDS_REVIEW, STATUS_ABOVE_LOWEST,
-                STATUS_NO_HISTORY, STATUS_PARSE_ERROR)
+                STATUS_NO_HISTORY, STATUS_PARSE_ERROR, STATUS_PENDING_PRICE)
 
 
 def _f(v):
@@ -76,13 +76,13 @@ def summarize(results):
         sup = r.get("supplier") or "(未填)"
         s = suppliers.setdefault(sup, {
             "supplier": sup, "total": 0, "matched": 0, "above": 0, "review": 0,
-            "nohistory": 0, "error": 0, "diff_rows": 0, "overpay": 0.0,
+            "nohistory": 0, "error": 0, "pending": 0, "diff_rows": 0, "overpay": 0.0,
             "underpay": 0.0, "max_gap_rate": 0.0,
         })
         s["total"] += 1
         key = {STATUS_MATCHED_LOWEST: "matched", STATUS_ABOVE_LOWEST: "above",
                STATUS_NEEDS_REVIEW: "review", STATUS_NO_HISTORY: "nohistory",
-               STATUS_PARSE_ERROR: "error"}.get(st)
+               STATUS_PARSE_ERROR: "error", STATUS_PENDING_PRICE: "pending"}.get(st)
         if key:
             s[key] += 1
         if gap is not None and abs(gap) > EPS:

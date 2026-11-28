@@ -12,7 +12,7 @@ from openpyxl.utils import get_column_letter
 from config import (
     OUTPUT_DIR, STATUS_LABELS, DIFF_LABELS,
     STATUS_MATCHED_LOWEST, STATUS_NEEDS_REVIEW, STATUS_ABOVE_LOWEST,
-    STATUS_NO_HISTORY, STATUS_PARSE_ERROR, LOW_QTY_THRESHOLD,
+    STATUS_NO_HISTORY, STATUS_PARSE_ERROR, STATUS_PENDING_PRICE, LOW_QTY_THRESHOLD,
 )
 import field_map
 import recon_stats
@@ -23,6 +23,7 @@ STATUS_COLOR = {
     STATUS_ABOVE_LOWEST: "FFF2CC",
     STATUS_NO_HISTORY: "FCE4D6",
     STATUS_PARSE_ERROR: "FCE4E4",
+    STATUS_PENDING_PRICE: "E7E6E6",   # 灰色：单价未定，未参与核对
 }
 C_HEAD = "FF4472C4"
 C_HEAD_FG = "FFFFFFFF"
@@ -278,6 +279,11 @@ def export_results(recon_no, results, batch):
     ab = [r for r in results if r["status"] == STATUS_ABOVE_LOWEST]
     fill_view(wb.create_sheet("高于历史最低价"), "高于历史最低价 · %d 条（黄色）" % len(ab), ab, "FFFFF2CC")
 
+    # 待核价：单价未定，本次未比对；单独成表方便拿去找供应商询价
+    pd = [r for r in results if r["status"] == STATUS_PENDING_PRICE]
+    if pd:
+        fill_view(wb.create_sheet("待核价"), "待核价 · %d 条（灰色，本次未参与核对）" % len(pd), pd, "FFE7E6E6")
+
     # 说明
     diff = batch.get("mapping_diff_json")
     try:
@@ -290,10 +296,13 @@ def export_results(recon_no, results, batch):
         ("已匹配最低价", batch.get("n_matched", 0)),
         ("需人工复核", batch.get("n_review", 0) + batch.get("n_nohistory", 0) + batch.get("n_error", 0)),
         ("高于历史最低价", batch.get("n_above", 0)),
+        ("待核价（未参与核对）", batch.get("n_pending", 0)),
         ("核对明细表头", "严格取自上传账单原表头：%s（共 %d 列，未增删改名）"
          % (" / ".join(headers), len(headers))),
         ("字段映射差异", "；".join(diff) if diff else "无差异：上传表头全部字段均成功映射"),
         ("匹配规则", "按供应商+型号匹配；材质仅展示不参与；最低价为历史有效单价（排除空价/待核价/0价）的最小值"),
+        ("待核价口径", "单价为空或写「待核价/待定/报价」的行允许上传，标「待核价」：不参与比价、不计入金额差异；"
+                       "补齐单价后重新上传该账单即按原流程核对"),
         ("低数量复核", "单价与历史最低价一致，但该价位的历史订单数量最多仍低于 %d 时，不判「已匹配」，"
                        "转「需人工复核」：数量过少多为打样/小批量价，需确认价格类型与账单金额"
                        % LOW_QTY_THRESHOLD),
@@ -304,7 +313,7 @@ def export_results(recon_no, results, batch):
         ("差异类型", "金额偏高 / 金额偏低 / 无历史基准 / 单价无法解析 / 多档价待定 / 日期早于基准 / 基准过期 / 月份缺失 / 型号近似匹配；"
                      "其中「型号近似匹配」是忽略符号差异后的命中，仅作参考、必须人工确认"),
         ("工作表说明", "「核对明细」表头严格等于上传账单；「差异汇总」给出总体金额差异、按供应商、按差异类型三块统计"),
-        ("状态说明", "已匹配最低价=本单单价等于历史最低；需人工复核=同型号多档价/低于历史最低/近似型号/无历史/解析失败；高于历史最低价=存在更低历史价"),
+        ("状态说明", "已匹配最低价=本单单价等于历史最低；需人工复核=同型号多档价/低于历史最低/近似型号/无历史/解析失败；高于历史最低价=存在更低历史价；待核价=单价未定，本次未核对"),
         ("备注", "核对产生的状态/依据/复核原因等派生字段放在独立工作表，未加入「核对明细」表头，以保证明细与上传账单列完全一致"),
     ]
     ws5 = wb.create_sheet("说明")

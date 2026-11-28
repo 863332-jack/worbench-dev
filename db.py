@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS recon_batch (
     n_above INTEGER DEFAULT 0,
     n_nohistory INTEGER DEFAULT 0,
     n_error INTEGER DEFAULT 0,
+    n_pending INTEGER DEFAULT 0,     -- 待核价（单价未填，本次未参与核对）
     created_at TEXT
 );
 
@@ -203,7 +204,8 @@ def init_db():
         for name, typ in cols.items():
             if name not in existing:
                 conn.execute("ALTER TABLE %s ADD COLUMN %s %s" % (table, name, typ))
-    add_cols("recon_batch", {"headers_json": "TEXT", "mapping_diff_json": "TEXT"})
+    add_cols("recon_batch", {"headers_json": "TEXT", "mapping_diff_json": "TEXT",
+                             "n_pending": "INTEGER DEFAULT 0"})
     add_cols("recon_result", {"raw_values_json": "TEXT"})
     # 智能对账：差异字段（老库升级时补列，历史批次这些字段为空，前端按「—」展示）
     add_cols("recon_result", {
@@ -895,10 +897,10 @@ def save_recon_file(recon_no, file_name, headers, mapping_diff, results, counts)
                 p,
             )
         conn.execute(
-            """UPDATE recon_batch SET total_rows=?,n_matched=?,n_review=?,n_above=?,n_nohistory=?,n_error=?
+            """UPDATE recon_batch SET total_rows=?,n_matched=?,n_review=?,n_above=?,n_nohistory=?,n_error=?,n_pending=?
                WHERE recon_no=?""",
             (counts["total"], counts["matched"], counts["review"], counts["above"],
-             counts["nohistory"], counts["error"], recon_no),
+             counts["nohistory"], counts["error"], counts.get("pending", 0), recon_no),
         )
         conn.execute("COMMIT")
     except Exception:

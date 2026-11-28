@@ -776,6 +776,67 @@ def main():
     check("多次编辑后去重哈希仍唯一（不撞唯一索引）", dup[0] == dup[1], str(dup))
     s.post(BASE + "/api/suppliers/history/rebuild", timeout=30)
 
+    print("== 18. 新账单空价（待核价）允许上传、不参与核对 ==")
+    # 新做配件尚未核价：单价留空或写「待核价」，整批不应被拦；有价行仍按原逻辑判定
+    pend = [["杰盛", "2027-10-10", "PD-EMPTY", "8*8", "铜", 10, "", 0, ""],
+            ["杰盛", "2027-10-10", "PD-TBD", "8*8", "铜", 5, "待核价", "", ""],
+            ["杰盛", "2027-10-10", "PD-PRICED", "8*8", "铜", 2, 9, 18, ""]]
+    f_pd = make_xlsx(os.path.join(TMP, "bill_pending.xlsx"), pend)
+    r = s.post(BASE + "/api/reconcile", files={"files": open(f_pd, "rb")}, timeout=30)
+    check("空价账单可上传（不再整批拒绝）", r.status_code == 200 and r.json().get("ok") is True,
+          r.text[:200])
+    r = r.json() if r.status_code == 200 else {}
+    c = r.get("counts", {})
+    check("待核价 2 行、解析失败 0 行", c.get("pending") == 2 and c.get("error") == 0, str(c))
+    check("有价行仍按原逻辑判定（无历史 → no_history）", c.get("nohistory") == 1, str(c))
+    check("总行数 3、待核价不计入需复核", c.get("total") == 3 and c.get("review") == 0, str(c))
+    no_pd = r["batches"][0]["recon_no"]
+    check("批次响应带 pending", r["batches"][0].get("pending") == 2, str(r["batches"][0]))
+
+    res = s.get(BASE + "/api/results/" + no_pd, timeout=20).json()
+    rows = {x["model"]: x for x in res.get("results", [])}
+    check("空价行状态为待核价、单价为空",
+          rows["PD-EMPTY"]["status"] == "pending_price" and rows["PD-EMPTY"]["bill_price"] is None,
+          str(rows.get("PD-EMPTY"))[:200])
+    check("「待核价」文字行同样判待核价", rows["PD-TBD"]["status"] == "pending_price",
+          str(rows.get("PD-TBD", {}).get("status")))
+    check("待核价行给出补价指引", "待后期核价" in (rows["PD-EMPTY"].get("reason") or ""),
+          str(rows["PD-EMPTY"].get("reason"))[:160])
+    check("差异类型标 pending_price",
+          "pending_price" in (rows["PD-EMPTY"].get("diff_types") or ""),
+          str(rows["PD-EMPTY"].get("diff_types")))
+    st = {d["code"]: d["rows"] for d in (res.get("summary") or {}).get("by_status", [])}
+    check("统计口径含待核价（2 行）", st.get("pending_price") == 2, str(st))
+    amt = (res.get("summary") or {}).get("amount", {})
+    check("待核价行不计入应有金额/超付", abs(amt.get("should_total", 0) - 0) < 0.01
+          and abs(amt.get("overpay", 0)) < 0.01, str(amt))
+    r = s.get(BASE + "/api/results/" + no_pd, params={"status": "pending_price"}, timeout=20).json()
+    check("按「待核价」筛选只返回 2 条", len(r.get("results", [])) == 2, str(len(r.get("results", []))))
+    batch_row = [b for b in s.get(BASE + "/api/reconcile/batches", timeout=10).json()["batches"]
+                 if b["recon_no"] == no_pd][0]
+    check("批次表记录 n_pending", batch_row.get("n_pending") == 2, str(batch_row)[:200])
+
+    # 导出：明细仍与上传表头一致，另附「待核价」工作表
+    dl = s.get(BASE + "/api/download/" + no_pd, timeout=60)
+    check("待核价批次可正常导出", dl.status_code == 200 and len(dl.content) > 5000,
+          str(dl.status_code))
+    if dl.status_code == 200:
+        import io as _io
+        from openpyxl import load_workbook
+        _wb = load_workbook(_io.BytesIO(dl.content))
+        check("导出含「待核价」工作表", "待核价" in _wb.sheetnames, str(_wb.sheetnames))
+        _ws = _wb["待核价"]
+        check("待核价工作表 2 行数据", _ws.max_row == 4, str(_ws.max_row))
+
+    # 回归：历史账单（沉淀基准）仍要求单价必填，不能被空价污染
+    f_h = make_xlsx(os.path.join(TMP, "hist_noprice.xlsx"),
+                    [["杰盛", "2027-10-11", "PD-HIST", "8*8", "铜", 10, "", 0, ""]])
+    r = s.post(BASE + "/api/history/upload", files={"files": open(f_h, "rb")}, timeout=30)
+    _j = r.json() if r.headers.get("Content-Type", "").startswith("application/json") else {}
+    check("历史账单空价仍拒绝（400 且指到单价列）",
+          r.status_code == 400 and any(e.get("field") == "单价" for e in _j.get("errors", [])),
+          r.text[:200])
+
     print()
     print("=" * 48)
     print("冒烟测试结果：通过 %d 项 / 失败 %d 项" % (PASS, FAIL))

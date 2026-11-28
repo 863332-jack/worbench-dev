@@ -7,6 +7,11 @@
    命中只作参考，状态强制为「需人工复核」，绝不自动判定为最低价；
 3. 未命中：标「无历史记录」。
 
+待核价（`STATUS_PENDING_PRICE`）：
+新做配件常先上账单、后核价，上传时单价为空或写「待核价/待定」。这类行照常入库，
+但状态判为「待核价」、不进入比价与差异统计；补价后重新上传即走上述三层匹配。
+它与「解析失败」的区别是：前者是业务上还没定价，后者是填了但填错。
+
 低数量复核（`DIFF_LOW_QTY`）：
 单价虽与历史最低价完全一致，但「等于最低价的历史订单」数量最多仍小于 `LOW_QTY_THRESHOLD`（默认 20）时，
 不判定为「已匹配最低价」，改判「需人工复核」。理由是数量过少的订单通常是打样/小批量试做价，
@@ -21,8 +26,9 @@
 import json
 from config import (
     STATUS_MATCHED_LOWEST, STATUS_NEEDS_REVIEW, STATUS_ABOVE_LOWEST,
-    STATUS_NO_HISTORY, STATUS_PARSE_ERROR,
-    DIFF_AMT_HIGH, DIFF_AMT_LOW, DIFF_NO_HIST, DIFF_PARSE_ERR, DIFF_MULTI_LEVEL,
+    STATUS_NO_HISTORY, STATUS_PARSE_ERROR, STATUS_PENDING_PRICE,
+    DIFF_AMT_HIGH, DIFF_AMT_LOW, DIFF_NO_HIST, DIFF_PARSE_ERR,
+    DIFF_MULTI_LEVEL, DIFF_PENDING_PRICE,
     DIFF_DATE_BEFORE, DIFF_BASE_STALE, DIFF_DATE_MISSING, DIFF_NEAR_MODEL,
     DIFF_LOW_QTY, BASE_STALE_MONTHS, LOW_QTY_THRESHOLD,
 )
@@ -155,6 +161,12 @@ def match_one(row, idx_map, key_index=None):
             base["reason"] = reason
         return base
 
+    # 待核价（新配件尚未报价）：不参与比价，也不能算「解析失败」——它不是数据错误
+    if row.get("pending_price"):
+        base["evidence"] = "本行单价未填（新配件尚未核价），本次未参与比价"
+        return finish(STATUS_PENDING_PRICE, [DIFF_PENDING_PRICE],
+                      "待后期核价：补齐单价后重新上传该账单，即按现有流程比对历史最低价")
+
     # 解析失败
     if row.get("exclude_reason") or not row.get("unit_price"):
         base["evidence"] = ""
@@ -281,6 +293,8 @@ def run_match(rows):
         "above": sum(1 for r in results if r["status"] == STATUS_ABOVE_LOWEST),
         "nohistory": sum(1 for r in results if r["status"] == STATUS_NO_HISTORY),
         "error": sum(1 for r in results if r["status"] == STATUS_PARSE_ERROR),
+        # 待核价：单价未填，本次不参与核对（独立统计，不计入「需人工复核」）
+        "pending": sum(1 for r in results if r["status"] == STATUS_PENDING_PRICE),
         # 智能对账统计：有金额差异的记录数 / 超付合计 / 少付合计
         "diff": sum(1 for r in results
                     if r.get("amount_gap") is not None and abs(r["amount_gap"]) > 0.0001),

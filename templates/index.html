@@ -207,7 +207,8 @@
     <div class="card">
       <div class="card-head">
         <div><h2>上传新账单并核对</h2>
-          <p class="muted">按「供应商+型号」匹配历史最低单价，判定是否已匹配最低价，并列出需人工复核的条目。</p></div>
+          <p class="muted">按「供应商+型号」匹配历史最低单价，判定是否已匹配最低价，并列出需人工复核的条目。</p>
+          <p class="muted">新做配件单价可以留空（或写「待核价」）：这类行照常接收，标为「待核价」且<b>不参与本次核对</b>；补齐单价后重新上传该账单即按原流程核对。</p></div>
       </div>
       <div class="form-row">
         <label>供应商 <span class="muted">(可选)</span></label>
@@ -252,6 +253,7 @@
         <button class="chip" data-status="above_lowest">高于历史最低价</button>
         <button class="chip" data-status="no_history">无历史记录</button>
         <button class="chip" data-status="parse_error">解析失败</button>
+        <button class="chip" data-status="pending_price">待核价</button>
       </div>
       <div class="filters diff-filters" id="diffFilters" style="display:none"></div>
       <div class="statcards" id="resultStats"></div>

@@ -98,6 +98,7 @@ tr:hover td{ background:#fafcff; }
 .st-review{ color:var(--orange); font-weight:600; }
 .st-above{ color:var(--yellow); font-weight:600; }
 .st-err{ color:var(--red); font-weight:600; }
+.st-pending{ color:var(--muted); font-weight:600; }
 .cell-evidence{ max-width:360px; color:#556; }
 .cell-reason{ max-width:320px; }
 
@@ -243,6 +244,7 @@ tr.st-match td{ background:var(--green-bg); }
 tr.st-review td{ background:var(--orange-bg, #fdf0e6); }
 tr.st-above td{ background:var(--yellow-bg, #fff9e6); }
 tr.st-err td{ background:var(--red-bg); }
+tr.st-pending td{ background:#f2f3f5; }
 
 /* 历史数据库管理 */
 .grid-form{ display:grid; grid-template-columns:repeat(2,1fr); gap:10px 18px; margin:12px 0; }

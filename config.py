@@ -41,7 +41,7 @@ def _env_int(name, default):
 
 # 版本号：会出现在 /api/status 与启动横幅里。
 # 用途：改完代码重建镜像后，用它确认 NAS 上跑的确实是新版本（避免"以为改了其实没生效"）。
-APP_VERSION = os.environ.get("RECON_VERSION", "1.5.0")
+APP_VERSION = os.environ.get("RECON_VERSION", "1.6.0")
 
 # 上传原件/导出结果保留天数（启动时 + 每日维护时清理）
 UPLOAD_RETENTION_DAYS = _env_int("RECON_RETENTION_DAYS", 90)
@@ -71,6 +71,7 @@ STATUS_NEEDS_REVIEW = "needs_review"          # 需人工复核
 STATUS_ABOVE_LOWEST = "above_lowest"          # 高于历史最低价（可核对）
 STATUS_NO_HISTORY = "no_history"              # 无历史记录
 STATUS_PARSE_ERROR = "parse_error"            # 解析失败
+STATUS_PENDING_PRICE = "pending_price"        # 待核价：单价未填/未定，本次不参与核对
 
 STATUS_LABELS = {
     STATUS_MATCHED_LOWEST: "已匹配最低价",
@@ -78,6 +79,7 @@ STATUS_LABELS = {
     STATUS_ABOVE_LOWEST: "高于历史最低价",
     STATUS_NO_HISTORY: "无历史记录",
     STATUS_PARSE_ERROR: "解析失败",
+    STATUS_PENDING_PRICE: "待核价（未参与核对）",
 }
 
 # 单价校验：排除待核价、空价、0价
@@ -95,6 +97,7 @@ DIFF_BASE_STALE = "base_stale"      # 基准过期：历史最低价距账单月
 DIFF_DATE_MISSING = "date_missing"  # 月份缺失，无法判断时效
 DIFF_NEAR_MODEL = "near_model"      # 型号近似匹配（忽略符号差异后命中，需确认是否同一物料）
 DIFF_LOW_QTY = "low_qty"            # 全等匹配但历史订单数量过少（疑打样价/小批量价，非批量做货价）
+DIFF_PENDING_PRICE = "pending_price"  # 单价未填（新配件未核价），本次不参与核对
 
 DIFF_LABELS = {
     DIFF_AMT_HIGH: "金额偏高",
@@ -107,6 +110,7 @@ DIFF_LABELS = {
     DIFF_DATE_MISSING: "月份缺失",
     DIFF_NEAR_MODEL: "型号近似匹配",
     DIFF_LOW_QTY: "历史数量偏少",
+    DIFF_PENDING_PRICE: "待后期核价",
 }
 # 需要人工处理的差异类型（用于「异常项」汇总与筛选）
 DIFF_ATTENTION = (DIFF_AMT_HIGH, DIFF_AMT_LOW, DIFF_NO_HIST, DIFF_PARSE_ERR,
